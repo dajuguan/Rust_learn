@@ -34,6 +34,7 @@ fn find(start_at:usize, finded_solution:Arc<AtomicBool> ,step:usize ,sender:mpsc
     }
 }
 fn main() {
+
     let thread_num = 8;
     let (sx, rx) = mpsc::channel();
     let finded_solution = Arc::new(AtomicBool::new(false));
@@ -49,3 +50,4 @@ fn main() {
         Err(_) => panic!("Worker thread detached!")
     } 
 }
+
