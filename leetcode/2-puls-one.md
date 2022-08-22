@@ -1,4 +1,4 @@
-# Rust每日一题---数据结构(数组)
+# Rust每日一题---数据结构-数组-plus-one
 [leetcode地址](https://leetcode.cn/problems/plus-one/)
 给定一个由 整数 组成的 非空 数组所表示的非负整数，在该数的基础上加一。
 

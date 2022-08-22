@@ -1,4 +1,4 @@
-# Rust每日一题---数据结构(数组)
+# Rust每日一题---数据结构-数组movezeros
 [leetcode地址](https://leetcode.cn/problems/move-zeroes/)
 ## 题目描述
 给定一个数组 nums，编写一个函数将所有 0 移动到数组的末尾，同时保持非零元素的相对顺序。
