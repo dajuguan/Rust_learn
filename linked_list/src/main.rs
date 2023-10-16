@@ -1,5 +1,3 @@
-use std::ops::DerefMut;
-
 type List<T> = Option<Box<Node<T>>>;
 struct LinkedList<T> {
     head: List<T>
@@ -51,8 +49,15 @@ impl<T> LinkedList<T> {
     fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T>{
         IterMut { next: self.head.as_deref_mut() }
     }
+}
 
-
+impl<T> Drop for LinkedList<T> {
+    fn drop(&mut self) {
+        let mut cur_link = self.head.take();
+        while let Some(mut node) = cur_link {
+            cur_link = node.next.take();  //drop node
+        }
+    }
 }
 
 
