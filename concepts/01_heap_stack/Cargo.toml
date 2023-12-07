@@ -1,13 +1,16 @@
 [package]
-name = "linked_list"
+name = "heap_stack"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "pointer"
+path = "src/pointer.rs"
+
+[[bin]]
+name = "string"
+path = "src/string.rs"
+
 [dependencies]
-
-[workspace]
-
-[profile.release]
-debug = true

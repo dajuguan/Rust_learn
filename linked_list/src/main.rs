@@ -1,82 +1,55 @@
-type List<T> = Option<Box<Node<T>>>;
-struct LinkedList<T> {
-    head: List<T>
-}
+type Link<T> = Option<Box<Node<T>>>;
 
-#[derive(Clone)]
-struct Node<T> {
+struct  Node<T> {
     elem: T,
-    next: List<T>
+    next: Link<T>
 }
 
-impl<T> LinkedList<T> {
-    fn push(&mut self, val:T) {
-        let new_node = Node {elem: val, next: self.head.take()} ;
-        self.head = Some(Box::new(new_node));
+struct LinkedList<T>{
+    head: Link<T>
+}
+
+impl <T> LinkedList<T> {
+    fn push(&mut self, val: T) {
+        let new_node = Node {elem: val, next: self.head.take() };
+        self.head = Some(Box::new(new_node)); 
     }
 
-    fn pop(&mut self) -> Option<T> {
-        let node = self.head.take();
-        match node {
-            Some(n) => {
-                self.head = n.next;
-                Some(n.elem)
-            },
-            None => None
-        }
+    fn pop(&mut self) -> Option<T>{
+        self.head.take().map(|node|{
+            self.head = node.next;
+            node.elem
+        })
     }
 
-    fn peek(&self) -> Option<&T> {
-        self.head.as_deref().map(|node| {
+    fn peek<'a>(&'a self) -> Option<&'a T> {
+        self.head.as_deref().map(|node|{
             &node.elem
         })
     }
 
-    fn peek_mut(&mut self) -> Option<&mut T> {
+    fn peek_mut<'a>(&'a mut self) -> Option<&'a mut T> {
         self.head.as_deref_mut().map(|node| {
             &mut node.elem
-        }) 
-    }
-
-    fn into_iter(self) -> IntoIter<T> {
-        IntoIter(self)
+        })
     }
 
     fn iter<'a>(&'a self) -> Iter<'a, T> {
         Iter {next: self.head.as_deref()}
     }
 
-    fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T>{
+    fn iter_mut<'a>(&'a mut self) -> IterMut<'a, T> {
         IterMut { next: self.head.as_deref_mut() }
     }
-}
-
-impl<T> Drop for LinkedList<T> {
-    fn drop(&mut self) {
-        let mut cur_link = self.head.take();
-        while let Some(mut node) = cur_link {
-            cur_link = node.next.take();  //drop node
-        }
-    }
+       
 }
 
 
-/// into Iter: T
-struct IntoIter<T>(LinkedList<T>);
-
-impl<T> Iterator for IntoIter<T> {
-    type Item = T;
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.pop()
-    }
+struct Iter<'a, T> {
+    next: Option<&'a Node<T>>
 }
 
-/// Iter: &T
-struct Iter<'a, T>{
-    next:Option<&'a Node<T>> 
-}
-
-impl <'a, T> Iterator for Iter<'a,T> {
+impl <'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
         self.next.map(|node|{
@@ -86,83 +59,96 @@ impl <'a, T> Iterator for Iter<'a,T> {
     }
 }
 
-//Itermut: &mut T
-
-struct IterMut<'a, T> {
-    next: Option<&'a mut Node<T>> 
+struct  IterMut<'a, T> {
+    next: Option<&'a mut Node<T>>
 }
 
-impl <'a, T> Iterator for IterMut<'a,T> {
+impl <'a, T> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
     fn next(&mut self) -> Option<Self::Item> {
-        self.next.take().map(|node| {
+        self.next.take().map(|node|{
             self.next = node.next.as_deref_mut();
             &mut node.elem
         })
     }
 }
 
+impl <T> Drop for LinkedList<T> {
+    fn drop(&mut self) {
+        let mut cur_link = self.head.take();
+        while let Some(mut node) = cur_link {
+            cur_link = node.next.take();
+        }
+    }
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn test_list() {
-        let mut list = LinkedList {head: None};
-        list.push(1);
-        list.push(2);
+    fn push_pop(){
+        let mut list = LinkedList{head: None};
         list.push(3);
+        list.push(2);
+        assert_eq!(list.pop(), Some(2));
         assert_eq!(list.pop(), Some(3));
-        assert_eq!(list.peek(), Some(&2));
-        list.peek_mut().map(|val| *val = 4);
-        assert_eq!(list.peek(), Some(&4));
-        assert_eq!(list.pop(), Some(4));
-        assert_eq!(list.pop(), Some(1));
         assert_eq!(list.pop(), None);
     }
 
     #[test]
-    fn test_intoiter() {
-        let mut list = LinkedList {head: None};
-        list.push(1);
-        list.push(2);
+    fn peek(){
+        let mut list = LinkedList{head: None};
         list.push(3);
-        let mut iter = list.into_iter();
-        assert_eq!(iter.next(), Some(3));
-        assert_eq!(iter.next(), Some(2));
-        assert_eq!(iter.next(), Some(1));
-    }
-
-    #[test]
-    fn test_iter() {
-        let mut list = LinkedList {head: None};
-        list.push(1);
         list.push(2);
-        list.push(3);
-        let mut iter = list.iter();
-        assert_eq!(iter.next(), Some(&3));
-        assert_eq!(iter.next(), Some(&2));
-        assert_eq!(iter.next(), Some(&1));
-    }
-
-    #[test]
-    fn test_iter_mut() {
-        let mut list = LinkedList {head: None};
-        list.push(1);
-        list.push(2);
-        list.push(3);
-        let mut iter = list.iter_mut();
-        assert_eq!(iter.next(), Some(&mut 3));
-        let v =  iter.next();
-        v.map(|v| {
-            *v = 4
+        assert_eq!(list.peek(), Some(&2));
+        list.peek_mut().map(|val|{
+            *val = 4;
         });
-        assert_eq!(iter.next(), Some(&mut 1));
+        assert_eq!(list.peek(), Some(&4));
+    }
+
+    #[test]
+    fn iter(){
+        let mut list = LinkedList{head: None};
+        list.push(3);
+        list.push(2);
         let mut iter = list.iter();
+        assert_eq!(iter.next(), Some(&2));
         assert_eq!(iter.next(), Some(&3));
-        assert_eq!(iter.next(), Some(&4));
-        assert_eq!(iter.next(), Some(&1));
+    }
+
+    
+    #[test]
+    fn iter_mut(){
+        let mut list = LinkedList{head: None};
+        list.push(3);
+        list.push(2);
+        let mut iter = list.iter_mut();
+        assert_eq!(iter.next(), Some(&mut 2));
+        iter.next().map(|val|{
+            *val = 5;
+        });
+        let mut iter = list.iter();
+        assert_eq!(iter.next(), Some(&2));
+        assert_eq!(iter.next(), Some(&5));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_drop(){
+        let mut list = LinkedList{head: None};
+        for i in 0..1000000 {
+            list.push(i);
+        }
     }
 }
 
 fn main() {
+    let a: usize = 4;
+    let b: usize = 2;
+    let a= vec![1,2,3,4,5];
+    println!("{:?}",&a[1..6]);
 }
