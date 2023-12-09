@@ -2,5 +2,6 @@
 
 members = [
     "01_heap_stack",
-    "02_pointer"
+    "02_pointer",
+    "03_grammer"
 ]
