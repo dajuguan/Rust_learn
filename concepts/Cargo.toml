@@ -3,5 +3,6 @@
 members = [
     "01_heap_stack",
     "02_pointer",
-    "03_grammer"
+    "03_grammer",
+    "04_lifetime"
 ]
