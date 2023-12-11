@@ -4,5 +4,9 @@ members = [
     "01_heap_stack",
     "02_pointer",
     "03_grammer",
-    "04_lifetime"
+    "04_lifetime",
+    "05_raii_type"
 ]
+
+[workspace.dependencies]
+tokio = {version = "1.35.0", features = ["sync"]}
