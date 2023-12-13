@@ -3,6 +3,8 @@ mod generic;
 mod trait_obj;
 mod ext_trait;
 mod fake_trait_obj;
+mod generic_tcp;
+mod linked_list;
 
 use ext_trait::IteratorExt;
 fn main() {
