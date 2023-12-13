@@ -1,4 +1,5 @@
-fn main() {
+#[test]
+fn string() {
     let data: String = "hello".into();
 
     let s1: &str = &data;

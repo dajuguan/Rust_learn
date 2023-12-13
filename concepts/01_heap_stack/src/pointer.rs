@@ -1,6 +1,7 @@
 fn foo() {}
 
-fn main() {
+#[test]
+fn pointer() {
     let s = "hello".to_string();
     let data = Box::new(1);
     println!("RODATA: {:p}", "hello");
