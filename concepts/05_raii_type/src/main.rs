@@ -5,6 +5,8 @@ mod ext_trait;
 mod fake_trait_obj;
 mod generic_tcp;
 mod linked_list;
+mod dst;
+mod hashmap;
 
 use ext_trait::IteratorExt;
 fn main() {

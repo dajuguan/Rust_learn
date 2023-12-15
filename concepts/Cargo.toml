@@ -8,7 +8,8 @@ members = [
     "05_raii_type",
     "06_ownership",
     "07_smart_pt",
-    "08_concurrency"
+    "08_concurrency",
+    "09_iter"
 ]
 
 [workspace.dependencies]
