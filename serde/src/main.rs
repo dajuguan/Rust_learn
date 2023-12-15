@@ -2,6 +2,7 @@
 use std::{collections::{BTreeMap, HashMap}, hash::Hasher};
 use serde::{Serialize, Deserialize};
 
+mod flexbuffer;
 
 
 #[derive( Debug)]
