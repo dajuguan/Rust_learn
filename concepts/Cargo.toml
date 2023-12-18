@@ -5,7 +5,7 @@ members = [
     "02_pointer",
     "03_grammer",
     "04_lifetime",
-    "05_raii_type",
+    "05_raii_type_trait",
     "06_ownership",
     "07_smart_pt",
     "08_concurrency",

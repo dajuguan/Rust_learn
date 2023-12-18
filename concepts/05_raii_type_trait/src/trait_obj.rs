@@ -1,5 +1,6 @@
 trait Pet {
     fn talk(&self);
+    fn not_object_safe<T:Debug>(&self, t: T) where Self: Sized;  // cannot be called on a trait object
 }
 
 struct Dog {
@@ -10,6 +11,10 @@ impl Pet for Dog {
     fn talk(&self){
         println!("Dog says: {}", self.name);
     }
+
+    fn not_object_safe<T:Debug>(&self, t: T) where Self: Sized {
+        println!("from Dog: {:?}", t);
+    }
 }
 
 struct Cat {
@@ -19,6 +24,10 @@ struct Cat {
 impl Pet for Cat {
     fn talk(&self){
         println!("Cat says: {}", self.name);
+    }
+
+    fn not_object_safe<T:Debug>(&self, t: T) where Self: Sized {
+        println!("from Cat: {:?}", t);
     }
 }
 
@@ -35,9 +44,12 @@ mod tests {
             name: "Miaomiao".to_string()
         };
 
+        cat.not_object_safe(3);
+
         let pets: Vec<Box<dyn Pet>> = vec![Box::new(dog), Box::new(cat)];
         for pet in pets {
             pet.talk();
+            // pet.not_object_safe(3); "not_object_safe method cannot be invoked on a trait object"
         }
     }
 }
