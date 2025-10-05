@@ -1,3 +1,4 @@
+mod channel;
 mod send_sync;
 
 fn main() {
