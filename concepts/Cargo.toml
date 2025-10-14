@@ -10,7 +10,8 @@ members = [
     "07_smart_pt",
     "08_concurrency",
     "09_iter",
-    "10_closure"
+    "10_closure",
+    "11_trait"
 ]
 
 [workspace.dependencies]
