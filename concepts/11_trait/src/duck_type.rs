@@ -25,11 +25,25 @@ fn accept_generic_vec(v: Vec<impl Human>) {
     }
 }
 
+// the above is the abbreviation of generic type,
+fn accept_generic_vec_t<T: Human>(v: Vec<T>) {
+    for item in v.iter() {
+        item.speak();
+    }
+}
+
 fn accept_trait_obj_vec(v: Vec<&dyn Human>) {
     for item in v.iter() {
         item.speak();
     }
 }
+
+// trait object is a type, not a trait, so it can't be used as trait bound or generic type!
+// fn accept_trait_obj_vec_t<T: &dyn Human>(v: Vec<T>) {
+//     for item in v.iter() {
+//         item.speak();
+//     }
+// }
 
 #[test]
 fn test_duck_type() {
