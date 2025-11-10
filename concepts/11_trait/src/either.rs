@@ -1,13 +1,13 @@
-pub use crate::either::Either::{Left, Right};
-
 #[derive(Debug)]
-pub enum Either<L, R> {
+pub enum MyEither<L, R> {
     Left(Option<L>),
     Right(R),
 }
 
 #[test]
 fn test_either() {
+    use crate::either::MyEither::{Left, Right};
+
     let x = 3;
     let mut res = match x {
         3 => Left(Some(0..3)),

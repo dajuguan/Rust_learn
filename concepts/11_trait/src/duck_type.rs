@@ -1,3 +1,5 @@
+pub use either::Either;
+
 trait Human {
     fn speak(&self);
 }
@@ -66,3 +68,18 @@ fn test_duck_type_fn() {
     let peoples = vec![m, m];
     accept_generic_vec(peoples);
 }
+
+struct HumanWrapper {
+    humans: Vec<Either<Man, WoMan>>,
+}
+
+// #[test]
+// fn test_duck_type_either() {
+//     use either::Either;
+//     let m = Man {};
+//     let w = WoMan {};
+//     let list: Vec<Either<Man, WoMan>> = vec![Either::Left(m), Either::Right(w)];
+//     for p in list.iter() {
+//         p.speak()
+//     }
+// }

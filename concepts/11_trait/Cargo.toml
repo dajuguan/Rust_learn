@@ -8,7 +8,7 @@ edition = "2024"
 [dependencies]
 auto_impl = "1.3.0"
 criterion = "0.3"
-
+either = { version = "1.15.0", default-features = false }
 
 [[bench]]
 name = "trait_objet_bench"
