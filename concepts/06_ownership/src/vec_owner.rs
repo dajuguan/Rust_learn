@@ -27,3 +27,34 @@ fn test_vec_addr_non_reallocation() {
     println!("Taken: {:?}", taken); // [1, 2, 3]
     println!("v after take: {:?}", v); // []
 }
+
+#[test]
+fn test_vec_struct_move() {
+    #[derive(Debug, Default)]
+    struct MyStruct {
+        value: u64,
+    }
+    // 创建一个 Vec，里面存放 MyStruct 实例
+    let mut v = vec![MyStruct { value: 10 }, MyStruct { value: 20 }];
+
+    // 打印 v 中元素的地址
+    let v_first_addr = &v[0] as *const MyStruct;
+    println!("Address of v's first element: {:?}", v_first_addr);
+
+    // 通过 take 转移 v 的所有权: 从heap内存copy到了stack
+    let taken = std::mem::take(&mut v[0]);
+
+    // 打印 taken 和 v
+    println!("Taken: {:?}", taken); //
+    println!("v after take: {:?}", v); // []
+
+    // 打印 taken 中元素的地址
+    let taken_first_addr = &taken as *const MyStruct;
+    println!("Address of taken's first element: {:?}", taken_first_addr);
+
+    // 查看 v 和 taken 的元素的内存地址是否相同
+    println!(
+        "Are the addresses equal? {}",
+        v_first_addr == taken_first_addr
+    );
+}
