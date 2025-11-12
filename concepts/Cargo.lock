@@ -350,6 +350,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "generic_trait_11"
+version = "0.1.0"
+dependencies = [
+ "auto_impl",
+ "criterion",
+ "either",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1410,15 +1419,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c06d3da6113f116aaee68e4d601191614c9053067f9ab7f6edbcb161237daa54"
 dependencies = [
  "once_cell",
-]
-
-[[package]]
-name = "trait_11"
-version = "0.1.0"
-dependencies = [
- "auto_impl",
- "criterion",
- "either",
 ]
 
 [[package]]

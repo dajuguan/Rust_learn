@@ -11,7 +11,7 @@ members = [
     "08_concurrency",
     "09_iter",
     "10_closure",
-    "11_trait",
+    "11_generic_trait",
 ]
 
 [workspace.dependencies]
