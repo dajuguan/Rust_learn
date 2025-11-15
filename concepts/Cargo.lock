@@ -302,6 +302,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "future_async"
+version = "0.1.0"
+
+[[package]]
 name = "futures-channel"
 version = "0.3.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
