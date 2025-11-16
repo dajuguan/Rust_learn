@@ -146,7 +146,7 @@ impl SelfReferentialPin {
 
 #[cfg(test)]
 mod tests {
-    use std::mem;
+    use std::{mem, pin::Pin};
 
     use super::*;
 
@@ -200,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn test_self_referential_mypin_correct() {
+    fn test_self_referential_mypin_correct_ub() {
         // instance is moved from move_create_issues{} to instance, must use function, or rust may optimize it away and the moved instance might not be gced, which cause the test passed uncorrectly.
         let mut instance = SelfReferentialPin::new(String::from("A!"));
         instance.init();
@@ -219,6 +219,7 @@ mod tests {
         let mut b_mut = ins_b.as_mut();
         // from semantics, a_mut(注意视角是a_mut，而不是inst_a) is moved in unsafe which violates the pin guarantee.
         unsafe {
+            // UB(undefined behavior)
             let a_mut = a_mut.get_unchecked_mut_wrong();
             let b_mut = b_mut.get_unchecked_mut_wrong();
             std::mem::swap(a_mut, b_mut);
@@ -229,12 +230,45 @@ mod tests {
 
         // from semantics, ins_a as_mut create a new MyPinCorrect<&mut T>, so the previous ins_a still holds the promise that it won't be moved, it's the new MyPinCorrect that moved the value.
         unsafe {
+            // UB
             let a_mut = a_mut.get_unchecked_mut();
             let b_mut = b_mut.get_unchecked_mut();
             std::mem::swap(a_mut, b_mut);
         };
         // 由于a_mut被move了，所以不会出现为定义行为，a_mut的所有者知道Pinned的值被改变了。
         // a_mut.get_data_via_pointer("inst after unsafe get mut");
+
+        ins_a.get_data_via_pointer("inst a after derefmut swap");
+        ins_b.get_data_via_pointer("inst b after derefmut swap");
+    }
+
+    #[test]
+    fn test_self_referential_pin_ub() {
+        // instance is moved from move_create_issues{} to instance, must use function, or rust may optimize it away and the moved instance might not be gced, which cause the test passed uncorrectly.
+        let mut instance = SelfReferentialPin::new(String::from("A!"));
+        instance.init();
+        let instance = unsafe { Pin::new_unchecked(&mut instance) };
+        instance.get_data_via_pointer("inst");
+        let mut ins_a = instance;
+        ins_a.get_data_via_pointer("inst after move to a");
+
+        let mut ins_b = SelfReferentialPin::new(String::from("B!"));
+        ins_b.init();
+        let mut ins_b = unsafe { Pin::new_unchecked(&mut ins_b) };
+        ins_b.get_data_via_pointer("inst b");
+
+        let a_mut = ins_a.as_mut();
+        let b_mut = ins_b.as_mut();
+
+        // This function is unsafe. You must guarantee that you will never move the data out of the mutable reference you receive when you call this function,
+        // so that the invariants on the Pin type can be upheld.
+        unsafe {
+            // UB
+            // 即使是拿到了Pin指向值的的可变引用Pin(一个新的pin)，也需要开发者自己保证不会移动被Pin住的值(因为这个Pin指向的值被move后，其他相关Pin的实例也会受到影响)，否则会违反Pin的语义。
+            let a_mut = a_mut.get_unchecked_mut();
+            let b_mut = b_mut.get_unchecked_mut();
+            std::mem::swap(a_mut, b_mut);
+        };
 
         ins_a.get_data_via_pointer("inst a after derefmut swap");
         ins_b.get_data_via_pointer("inst b after derefmut swap");
