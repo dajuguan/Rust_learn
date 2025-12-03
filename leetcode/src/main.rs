@@ -1,6 +1,7 @@
 mod lc_11;
 mod lc_128;
 mod lc_2;
+mod lc_230;
 mod lc_3;
 mod lc_41;
 mod lc_53;
