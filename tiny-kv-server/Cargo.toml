@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# transport
 prost = "0.14" # deal with protobuf
+# error handling
+thiserror = "1"
 
 [build-dependencies]
 prost-build = "0.14" # build protobuf
