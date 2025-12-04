@@ -29,16 +29,20 @@ impl Solution {
         let mut root = root;
         let mut stack = vec![];
         while root.is_some() || stack.len() > 0 {
+            // process left subtree
             while let Some(node) = root {
                 // Rc::clone is faster than node.clone() because there is no need to unwarp option then clone with option, it just increase the reference counter.
                 stack.push(Rc::clone(&node));
                 root = node.borrow().left.clone();
             }
+
+            // process mid node
             let node = stack.pop().unwrap();
             k -= 1;
             if k == 0 {
                 return node.borrow().val;
             }
+            // process right node
             root = node.borrow().right.clone();
         }
 
