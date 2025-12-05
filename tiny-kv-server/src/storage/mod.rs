@@ -1,8 +1,8 @@
-use crate::KvError;
-
 mod memory;
 
 pub use memory::MemStore;
+
+use crate::KvError;
 
 pub trait Storage<K, V> {
     fn get(&self, table: &K, key: &K) -> Result<Option<V>, KvError>;

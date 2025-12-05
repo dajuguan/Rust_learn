@@ -1,8 +1,7 @@
-#[cfg(test)]
-use crate::Kvpair;
+mod cmd_service;
+
 use crate::{CommandRequest, CommandResponse, Storage, Value, command_request::RequestData};
 
-mod cmd_service;
 pub trait CommandService {
     fn execute(self, store: &impl Storage<String, Value>) -> CommandResponse;
 }
@@ -16,7 +15,7 @@ pub fn dispatch(cmd_req: CommandRequest, store: &impl Storage<String, Value>) ->
 }
 
 #[cfg(test)]
-pub fn assert_res_ok(res: &CommandResponse, values: &[Value], pairs: &[Kvpair]) {
+pub fn assert_res_ok(res: &CommandResponse, values: &[Value], pairs: &[crate::Kvpair]) {
     use crate::StatusCode;
 
     let mut sorted_pairs = res.pairs.clone();

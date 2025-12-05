@@ -1,6 +1,6 @@
-use crate::{CommandRequest, Hget, Hset, Kvpair, Value, command_request::RequestData, value};
-
 pub mod abi;
+
+use crate::{CommandRequest, Hget, Hset, Kvpair, Value, command_request::RequestData, value};
 
 impl CommandRequest {
     pub fn new_hget(table: impl Into<String>, key: impl Into<String>) -> Self {

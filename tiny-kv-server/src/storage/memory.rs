@@ -1,11 +1,9 @@
+use crate::{KvError, Storage};
+use dashmap::{DashMap, mapref::one::Ref};
 use std::hash::Hash;
 
-use dashmap::{DashMap, mapref::one::Ref};
-
-use crate::{KvError, Storage, Value};
-
 #[derive(Debug, Clone, Default)]
-pub struct MemStore<K: Eq + Hash, V = Value> {
+pub struct MemStore<K: Eq + Hash, V> {
     tables: DashMap<K, DashMap<K, V>>,
 }
 
