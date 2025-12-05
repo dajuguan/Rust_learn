@@ -1,13 +1,14 @@
-use crate::{CommandRequest, CommandResponse, Hget, Storage, command_request::RequestData};
+use crate::{CommandRequest, CommandResponse, Hget, Storage, Value, command_request::RequestData};
 
 mod cmd_service;
 pub trait CommandService {
-    fn execute(self, store: &impl Storage) -> CommandResponse;
+    fn execute(self, store: &impl Storage<String, Value>) -> CommandResponse;
 }
 
-pub fn dispatch(cmdReq: CommandRequest, store: &impl Storage) -> CommandResponse {
+pub fn dispatch(cmdReq: CommandRequest, store: &impl Storage<String, Value>) -> CommandResponse {
     match cmdReq.request_data.unwrap() {
-        RequestData::Hget(param) => CommandResponse::default(),
+        RequestData::Hget(params) => params.execute(store),
+        RequestData::Hset(params) => params.execute(store),
         _ => CommandResponse::default(),
     };
 

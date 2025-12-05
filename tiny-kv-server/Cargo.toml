@@ -8,6 +8,8 @@ edition = "2024"
 prost = "0.14" # deal with protobuf
 # error handling
 thiserror = "1"
+# storage
+dashmap = "6.1.0"  # in-memory store
 
 [build-dependencies]
 prost-build = "0.14" # build protobuf

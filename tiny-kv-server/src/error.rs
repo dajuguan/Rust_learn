@@ -4,6 +4,8 @@ use thiserror::Error;
 pub enum KvError {
     #[error("Not found: {0}")]
     NotFound(String),
+    #[error("InvalidCommand: {0}")]
+    InvalidCommand(String),
 }
 
 #[derive(Copy, Clone, Debug)]
