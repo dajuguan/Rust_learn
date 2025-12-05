@@ -1,7 +1,9 @@
-use crate::{CommandResponse, CommandService, Hget, Hset, KvError, StatusCode, Value};
+use crate::{
+    CommandResponse, CommandService, Hget, Hset, KvError, MemStore, StatusCode, Storage, Value,
+};
 
 impl CommandService for Hget {
-    fn execute(self, store: &impl crate::Storage<String, Value>) -> CommandResponse {
+    fn execute(self, store: &impl Storage<String, Value>) -> CommandResponse {
         match store.get(&self.table, &self.key) {
             Ok(Some(v)) => v.into(),
             Ok(None) => KvError::NotFound(format!("table {}, key {}", self.table, self.key)).into(),
@@ -11,7 +13,7 @@ impl CommandService for Hget {
 }
 
 impl CommandService for Hset {
-    fn execute(self, store: &impl crate::Storage<String, Value>) -> CommandResponse {
+    fn execute(self, store: &impl Storage<String, Value>) -> CommandResponse {
         match self.pair {
             Some(kv) => match store.set(&self.table, kv.key, kv.value.unwrap_or_default()) {
                 Ok(Some(v)) => v.into(),
@@ -42,5 +44,40 @@ impl From<KvError> for CommandResponse {
             values: vec![],
             pairs: vec![],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{CommandRequest, assert_res_ok, dispatch};
+
+    use super::*;
+
+    #[test]
+    fn hset_should_work() {
+        let store = MemStore::default();
+        let table = "t".to_string();
+        let key = "k".to_string();
+        let val = 10;
+        let req = CommandRequest::new_hset(table.clone(), key.clone(), val.into());
+        dispatch(req, &store);
+
+        let req = CommandRequest::new_hset(table, key, val.into());
+        let res = dispatch(req, &store);
+        assert_res_ok(&res, &vec![val.into()], &vec![]);
+    }
+
+    #[test]
+    fn hget_should_work() {
+        let store = MemStore::default();
+        let table = "t".to_string();
+        let key = "k".to_string();
+        let val = 10;
+        let req = CommandRequest::new_hset(table.clone(), key.clone(), val.into());
+        dispatch(req, &store);
+
+        let req = CommandRequest::new_hget(table, key);
+        let res = dispatch(req, &store);
+        assert_res_ok(&res, &vec![val.into()], &vec![]);
     }
 }

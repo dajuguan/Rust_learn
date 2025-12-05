@@ -2,6 +2,8 @@ use crate::KvError;
 
 mod memory;
 
+pub use memory::MemStore;
+
 pub trait Storage<K, V> {
     fn get(&self, table: &K, key: &K) -> Result<Option<V>, KvError>;
     // set would be multithreading, so interior mutability is enough, that's why &self instead of &mut self is used.
@@ -49,7 +51,7 @@ mod tests {
     }
 
     #[test]
-    fn memstore_basi_trait_should_work() {
+    fn memstore_basic_trait_should_work() {
         let store = MemStore::default();
         test_basic_trait(store);
     }
