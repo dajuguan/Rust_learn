@@ -3,13 +3,26 @@ name = "tiny-kv-server"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "kvs"
+path = "src/bins/server.rs"
+doc = false
+
+[[bin]]
+name = "kvc"
+path = "src/bins/client.rs"
+doc = false
+
 [dependencies]
 # transport
 prost = "0.14" # deal with protobuf
 # error handling
 thiserror = "1"
 # storage
-dashmap = "6.1.0"  # in-memory store
+dashmap = "6.1.0" # in-memory store
+# network and async
+tokio = { version = "1", features = ["full"] }
+flate2 = { version = "1" }                     # encode/decode
 
 [build-dependencies]
 prost-build = "0.14" # build protobuf

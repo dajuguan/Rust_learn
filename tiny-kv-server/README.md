@@ -4,6 +4,20 @@ client send req to a kv-server, which can accept CRUD cmd and return response.
 - 消息格式: protolbuf(序列化/反序列化)
 - client server通讯: stream (TCP, TLS)
     - Server区分消息: 采用frame_id
+    - LenDelimitedStream
+        - stream
+        - wbuf
+        - wlen
+        - rbuf
+        - SinkItem
+        - StreamItem
+    - Frame:
+        - decodeFrame(buf) -> Result<Self>
+        - encodeFrame(&self, &mut buf) -> Result<(), KvError>
+    - Stream (tcp stream):
+        - 
+    - Sink
+
 - Dispatcher: execute(self, request) -> Resp
 - Storage:
     - get
