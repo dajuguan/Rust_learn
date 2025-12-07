@@ -1,4 +1,7 @@
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    pin::Pin,
+};
 
 use prost::{
     Message,
@@ -6,6 +9,7 @@ use prost::{
 };
 
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{CommandRequest, CommandResponse, KvError};
 
@@ -79,6 +83,20 @@ fn decode_header(header: usize) -> (usize, bool) {
     let compressed = (header & COMPRESSION_BIT) == COMPRESSION_BIT;
     (len, compressed)
 }
+pub async fn read_frame<S>(stream: &mut S, buf: &mut BytesMut) -> Result<(), KvError>
+where
+    S: AsyncRead + Unpin,
+{
+    let header = stream.read_u32().await? as usize;
+    let (len, _) = decode_header(header);
+    buf.reserve(HEADER_LEN + len);
+    buf.put_u32(header as _);
+    // by set buf's len before, then call read_exact
+    unsafe { buf.advance_mut(len) };
+    stream.read_exact(&mut buf[HEADER_LEN..]).await?;
+
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -86,7 +104,8 @@ mod tests {
 
     use crate::{
         CommandRequest, CommandResponse,
-        networking::frame::{FrameCoder, decode_header},
+        networking::frame::{FrameCoder, decode_header, read_frame},
+        utils::DummyStream,
     };
 
     #[test]
@@ -148,5 +167,19 @@ mod tests {
         let (len, compressed) = decode_header(header);
         assert_eq!(len, 0x1000000f);
         assert!(!compressed);
+    }
+
+    #[tokio::test]
+    async fn test_read_frame() {
+        let cmd = CommandRequest::new_hget("t1", "k1");
+        let mut buf = BytesMut::new();
+        cmd.encoded_frame(&mut buf).unwrap();
+
+        let mut s = DummyStream { buf: buf };
+        let mut buf = BytesMut::new();
+        read_frame(&mut s, &mut buf).await.unwrap();
+
+        let decoded_cmd = CommandRequest::decode_frame(&mut buf).unwrap();
+        assert_eq!(cmd, decoded_cmd);
     }
 }
