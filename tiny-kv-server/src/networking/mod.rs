@@ -1,10 +1,12 @@
 mod frame;
 mod service;
 mod stream;
+mod tls;
 
 pub use frame::*;
 pub use service::*;
 pub use stream::*;
+pub use tls::*;
 
 #[cfg(test)]
 pub mod utils {

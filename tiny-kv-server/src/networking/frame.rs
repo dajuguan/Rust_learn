@@ -59,7 +59,7 @@ where
 
             let payload = encoder.finish()?.into_inner();
 
-            debug!("Encode a frame: size {}({})", len, payload.len());
+            debug!("Compress a frame: size {}({})", len, payload.len());
             // override len with compressed len
             buf.put_u32((payload.len() | COMPRESSION_BIT) as _);
             // merge the underling payload

@@ -1,7 +1,4 @@
-use crate::{
-    CommandResponse, CommandService, Hget, Hset, KvError, MemStore, StatusCode, Storage, Value,
-    debug,
-};
+use crate::{CommandResponse, CommandService, Hget, Hset, KvError, StatusCode, Storage, Value};
 
 impl CommandService for Hget {
     fn execute(self, store: &impl Storage<String, Value>) -> CommandResponse {
@@ -17,14 +14,8 @@ impl CommandService for Hset {
     fn execute(self, store: &impl Storage<String, Value>) -> CommandResponse {
         match self.pair {
             Some(kv) => match store.set(&self.table, kv.key, kv.value.unwrap_or_default()) {
-                Ok(Some(v)) => {
-                    debug!("prev:{:?}", v);
-                    v.into()
-                }
-                Ok(None) => {
-                    debug!("prev none");
-                    Value::default().into()
-                }
+                Ok(Some(v)) => v.into(),
+                Ok(None) => Value::default().into(),
                 Err(e) => e.into(),
             },
             None => KvError::InvalidCommand(format!("{:?}", self)).into(),
@@ -56,10 +47,7 @@ impl From<KvError> for CommandResponse {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CommandRequest, assert_res_ok, dispatch};
-
-    use super::*;
-
+    use crate::{CommandRequest, MemStore, assert_res_ok, dispatch};
     #[test]
     fn hset_should_work() {
         let store = MemStore::default();

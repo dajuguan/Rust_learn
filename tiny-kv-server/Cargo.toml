@@ -24,6 +24,11 @@ dashmap = "6.1.0" # in-memory store
 tokio = { version = "1", features = ["full"] }
 flate2 = "1"                                   # encode/decode
 futures = "0.3"
+# tls
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+
+# misc
+rand = "0.9"
 
 [build-dependencies]
 prost-build = "0.14" # build protobuf

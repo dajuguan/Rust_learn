@@ -16,6 +16,8 @@ pub enum KvError {
     IoError(#[from] std::io::Error),
     #[error("Internal error: {0}")]
     Internal(String),
+    #[error("Fail to decrypt or encrypt")]
+    AheadCipherError(#[from] chacha20poly1305::Error),
 }
 
 #[derive(Copy, Clone, Debug)]

@@ -1,5 +1,5 @@
 use std::io;
-use tiny_kv_server::{MemStore, ServerService, Service};
+use tiny_kv_server::{MemStore, SecureStream, ServerService, Service};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -9,7 +9,8 @@ async fn main() -> io::Result<()> {
     loop {
         let (stream, addr) = listener.accept().await.unwrap();
         println!("client:{:?} connected", addr);
-        let server = ServerService::new(stream, service.clone());
+        let secure_s = SecureStream::new(stream);
+        let server = ServerService::new(secure_s, service.clone());
         tokio::spawn(server.process());
     }
 }

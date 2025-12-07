@@ -114,11 +114,12 @@ mod tests {
     async fn start_server() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let service = Service::new(MemStore::default());
+
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
-                let service = Service::new(MemStore::default());
-                let server = ServerService::new(stream, service);
+                let server = ServerService::new(stream, service.clone());
                 tokio::spawn(server.process());
             }
         });
