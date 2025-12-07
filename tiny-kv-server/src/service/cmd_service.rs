@@ -1,5 +1,6 @@
 use crate::{
     CommandResponse, CommandService, Hget, Hset, KvError, MemStore, StatusCode, Storage, Value,
+    debug,
 };
 
 impl CommandService for Hget {
@@ -16,8 +17,14 @@ impl CommandService for Hset {
     fn execute(self, store: &impl Storage<String, Value>) -> CommandResponse {
         match self.pair {
             Some(kv) => match store.set(&self.table, kv.key, kv.value.unwrap_or_default()) {
-                Ok(Some(v)) => v.into(),
-                Ok(None) => Value::default().into(),
+                Ok(Some(v)) => {
+                    debug!("prev:{:?}", v);
+                    v.into()
+                }
+                Ok(None) => {
+                    debug!("prev none");
+                    Value::default().into()
+                }
                 Err(e) => e.into(),
             },
             None => KvError::InvalidCommand(format!("{:?}", self)).into(),

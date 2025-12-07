@@ -1,19 +1,33 @@
 use std::error::Error;
 
-use futures::SinkExt;
-use tiny_kv_server::{CommandRequest, CommandResponse, StreamAdapter};
+use futures::future::join_all;
+use tiny_kv_server::{ClientService, CommandRequest, CommandResponse};
 use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Connect to a peer
-    let stream = TcpStream::connect("127.0.0.1:8080").await?;
+    let n = 10; // num clients
+    let mut tasks = Vec::with_capacity(n);
+    for i in 0..n {
+        tasks.push(tokio::spawn(async move {
+            let stream = TcpStream::connect("127.0.0.1:8080").await.unwrap();
 
-    let mut stream: StreamAdapter<TcpStream, CommandResponse, CommandRequest> =
-        StreamAdapter::new(stream);
+            let mut client = ClientService::new(stream);
 
-    let cmd = CommandRequest::new_hset("t1", "k1", "v1".into());
-    stream.send(cmd).await?;
+            let cmd = CommandRequest::new_hset("t1", "k1", i.to_string().into());
+            let res: CommandResponse = client.execute(cmd).await.unwrap();
+            println!("Client:{}, got set resp: {:?}", i, res);
+
+            let cmd = CommandRequest::new_hget("t1", "k1");
+            let res: CommandResponse = client.execute(cmd).await.unwrap();
+            println!("Client:{}, got get resp: {:?}", i, res);
+        }));
+    }
+
+    join_all(tasks).await;
+
+
+    
 
     Ok(())
 }
