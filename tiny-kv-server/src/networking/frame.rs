@@ -1,7 +1,4 @@
-use std::{
-    io::{Read, Write},
-    pin::Pin,
-};
+use std::io::{Read, Write};
 
 use prost::{
     Message,
@@ -11,7 +8,7 @@ use prost::{
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-use crate::{CommandRequest, CommandResponse, KvError};
+use crate::{CommandRequest, CommandResponse, KvError, debug};
 
 const MAX_FRAME_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GB
 const HEADER_LEN: usize = 4;
@@ -62,6 +59,7 @@ where
 
             let payload = encoder.finish()?.into_inner();
 
+            debug!("Encode a frame: size {}({})", len, payload.len());
             // override len with compressed len
             buf.put_u32((payload.len() | COMPRESSION_BIT) as _);
             // merge the underling payload

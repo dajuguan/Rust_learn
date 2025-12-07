@@ -6,7 +6,7 @@ use std::{
 use futures::{FutureExt, Sink, Stream};
 use prost::bytes::BytesMut;
 use std::pin::Pin;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
     KvError,
@@ -81,6 +81,7 @@ where
         Ok(())
     }
 
+    // flush self.stream
     fn poll_flush(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

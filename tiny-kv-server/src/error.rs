@@ -14,6 +14,8 @@ pub enum KvError {
     DecodeError(#[from] prost::DecodeError),
     #[error("Failed to read buf caused by I/O error ")]
     IoError(#[from] std::io::Error),
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -26,4 +28,19 @@ impl From<StatusCode> for u32 {
     fn from(s: StatusCode) -> Self {
         s as u32
     }
+}
+
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => {{
+        #[cfg(debug_assertions)]
+        {
+            eprintln!(
+                "[DEBUG][{}:{}] {}",
+                file!(),
+                line!(),
+                format!($($arg)*)
+            );
+        }
+    }};
 }

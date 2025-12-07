@@ -1,5 +1,7 @@
 pub mod abi;
 
+use prost::bytes::Bytes;
+
 use crate::{CommandRequest, Hget, Hset, Kvpair, Value, command_request::RequestData, value};
 
 impl CommandRequest {
@@ -68,6 +70,14 @@ impl From<i64> for Value {
     fn from(i: i64) -> Self {
         Self {
             value: Some(value::Value::Integer(i)),
+        }
+    }
+}
+
+impl From<Bytes> for Value {
+    fn from(b: Bytes) -> Self {
+        Self {
+            value: Some(value::Value::Binary(b)),
         }
     }
 }

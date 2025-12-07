@@ -1,5 +1,10 @@
 mod frame;
+mod service;
 mod stream;
+
+pub use frame::*;
+pub use service::*;
+pub use stream::*;
 
 #[cfg(test)]
 pub mod utils {

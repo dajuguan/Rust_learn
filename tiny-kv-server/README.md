@@ -15,9 +15,10 @@ client send req to a kv-server, which can accept CRUD cmd and return response.
         - decodeFrame(buf) -> Result<Self>
         - encodeFrame(&self, &mut buf) -> Result<(), KvError>
     - Stream (tcp stream):
-        - 
     - Sink
-
+- Service
+    - client: execute(cmd) -> resp
+    - server: process() -> ()
 - Dispatcher: execute(self, request) -> Resp
 - Storage:
     - get
