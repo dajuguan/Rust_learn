@@ -78,7 +78,7 @@ where
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-        buf: &[u8],
+        buf: &[u8], // here, we assume the frame is written at once. To be safe, we'll have to maintain a state machine like read to cache written buf incase partial written, but we'll leave it for now.
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
@@ -102,6 +102,7 @@ where
         frame.put_slice(&nonce);
         frame.put_slice(&ciphertext);
         ready!(Pin::new(&mut this.stream).poll_write(cx, &frame)?);
+        // notify the upper app layer how much buffer has been written.
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -166,7 +167,7 @@ where
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
-        out: &mut ReadBuf<'_>,
+        out: &mut ReadBuf<'_>, // out buffer's len is controlled by the caller (in this case read_frame)
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
         loop {
@@ -257,6 +258,8 @@ where
                     out.put_slice(out_slice);
                     *pos += can_copy;
 
+                    // we have to keep track of the pos(pos) and innner buffer(data) state,
+                    // because read_frame will read partial 4 bytes for len first, then read len(plain_text)
                     if *pos == data.len() {
                         // all frame data has been sent, reset inner state to ReadHeader.
                         this.read_state = ReadState::ReadHeader {

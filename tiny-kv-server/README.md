@@ -19,6 +19,11 @@ client send req to a kv-server, which can accept CRUD cmd and return response.
 - Service
     - client: execute(cmd) -> resp
     - server: process() -> ()
+- SecureStream
+    - encrypt(&self, nonce:&[u8], plaintext:&[u8]) -> vec<u8>
+    - encrypt(&self, nonce:&[u8], ciphertext: &[u8]) -> vec<u8>
+    - poll_read() -> 通过缓存状态机来维护从底层tcp读出来的状态，供上层应用透明访问
+    - poll_write() -> 同样可以通过缓存状态机来维护写入的数据，供上层应用透明访问
 - Dispatcher: execute(self, request) -> Resp
 - Storage:
     - get
