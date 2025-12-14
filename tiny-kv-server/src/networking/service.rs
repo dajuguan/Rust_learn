@@ -74,7 +74,7 @@ mod tests {
     use prost::bytes::Bytes;
     use tokio::net::{TcpListener, TcpStream};
 
-    use crate::{MemStore, assert_res_ok};
+    use crate::{MemStore, ServiceInner, assert_res_ok};
 
     use super::*;
 
@@ -114,7 +114,8 @@ mod tests {
     async fn start_server() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let service = Service::new(MemStore::default());
+        let inner = ServiceInner::new(MemStore::default());
+        let service: Service<String, Value, _> = inner.into();
 
         tokio::spawn(async move {
             loop {

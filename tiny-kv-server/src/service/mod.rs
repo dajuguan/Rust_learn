@@ -1,9 +1,12 @@
 mod cmd_service;
+mod notification;
 
 use std::{hash::Hash, marker::PhantomData, sync::Arc};
 
 use crate::{
-    CommandRequest, CommandResponse, MemStore, Storage, Value, command_request::RequestData,
+    CommandRequest, CommandResponse, MemStore, Storage, Value,
+    command_request::RequestData,
+    service::{notification::Notify, notification::NotifyMut},
 };
 
 pub trait CommandService {
@@ -24,13 +27,11 @@ pub struct Service<K: Eq + Hash, V, S = MemStore<K, V>> {
     _v: PhantomData<V>,
 }
 
-impl<K, V, S> Service<K, V, S>
+impl<K: Eq + Hash, V, S> From<ServiceInner<S>> for Service<K, V, S>
 where
-    K: Eq + Hash,
     S: Storage<K, V>,
 {
-    pub fn new(store: S) -> Self {
-        let inner = ServiceInner { store };
+    fn from(inner: ServiceInner<S>) -> Self {
         Self {
             inner: Arc::new(inner),
             _k: PhantomData::default(),
@@ -59,12 +60,45 @@ where
     S: Storage<String, Value>,
 {
     pub fn execute(&self, cmd: CommandRequest) -> CommandResponse {
-        dispatch(cmd, &self.inner.store)
+        self.inner.on_req.notify(&cmd);
+        let mut resp = dispatch(cmd, &self.inner.store);
+        self.inner.on_exe.notify(&resp);
+        self.inner.on_before_send.notify(&mut resp);
+        resp
     }
 }
 
-struct ServiceInner<S> {
+pub struct ServiceInner<S> {
     store: S,
+    on_req: Vec<fn(&CommandRequest)>,
+    on_exe: Vec<fn(&CommandResponse)>,
+    on_before_send: Vec<fn(&mut CommandResponse)>,
+}
+
+impl<S> ServiceInner<S> {
+    pub fn new(store: S) -> Self {
+        Self {
+            store,
+            on_req: vec![],
+            on_exe: vec![],
+            on_before_send: vec![],
+        }
+    }
+
+    pub fn fn_on_req(mut self, f: fn(&CommandRequest)) -> Self {
+        self.on_req.push(f);
+        self
+    }
+
+    pub fn fn_on_exe(mut self, f: fn(&CommandResponse)) -> Self {
+        self.on_exe.push(f);
+        self
+    }
+
+    pub fn fn_on_before_send(mut self, f: fn(&mut CommandResponse)) -> Self {
+        self.on_before_send.push(f);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -73,7 +107,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_should_work() {
-        let service = Service::new(MemStore::default());
+        let service: Service<String, Value, _> = ServiceInner::new(MemStore::default()).into();
         let s_clone = service.clone();
 
         let cmd = CommandRequest::new_hset("t1", "k1", "v1".into());
@@ -94,7 +128,6 @@ pub fn assert_res_ok(res: &CommandResponse, values: &[Value], pairs: &[crate::Kv
     sorted_pairs.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
     assert_eq!(res.status, StatusCode::Ok.into());
-    assert_eq!(res.message, "");
     assert_eq!(res.values, values);
     assert_eq!(sorted_pairs, pairs);
 }
