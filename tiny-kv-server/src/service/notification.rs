@@ -24,7 +24,7 @@ impl<T> NotifyMut<T> for Vec<fn(&mut T)> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{CommandRequest, CommandResponse};
+    use crate::CommandRequest;
     use crate::{assert_res_ok, service::ServiceInner};
 
     use super::*;

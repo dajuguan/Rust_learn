@@ -2,6 +2,7 @@ mod frame;
 mod service;
 mod stream;
 mod tls;
+mod yamux;
 
 pub use frame::*;
 pub use service::*;
