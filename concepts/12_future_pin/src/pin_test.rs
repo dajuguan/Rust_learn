@@ -236,3 +236,35 @@ mod tests {
         a_mut.get_data_via_pointer("inst after unsafe get mut");
     }
 }
+
+#[cfg(test)]
+#[test]
+fn test_break_pin_promise() {
+    use std::mem;
+    use std::pin::Pin;
+    struct SelfRef {
+        data: String,
+        ptr: *const String,
+    }
+
+    impl SelfRef {
+        fn new(s: &str) -> Self {
+            let mut v = Self {
+                data: s.to_string(),
+                ptr: std::ptr::null(),
+            };
+            v.ptr = &v.data;
+            v
+        }
+    }
+
+    let mut v = SelfRef::new("hello");
+    println!("Before move, ptr points to: {}", unsafe { &*v.ptr });
+    let pinned = unsafe { Pin::new_unchecked(&mut v) };
+    unsafe {
+        // move out SelfRef
+        let _moved = mem::replace(pinned.get_unchecked_mut(), SelfRef::new("boom"));
+    }
+
+    println!("After move, ptr points to: {}", unsafe { &*v.ptr });
+}
