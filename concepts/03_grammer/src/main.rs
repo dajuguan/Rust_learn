@@ -1,4 +1,3 @@
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<String>>();
     if args.len() < 2 {
@@ -16,6 +15,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("write to file:{}", output);
     std::fs::write(output, md.as_bytes())?;
     Ok(())
-
-
 }
