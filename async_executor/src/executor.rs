@@ -10,7 +10,9 @@ use std::{
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 struct Task {
+    // because Waker::from(arc_task) need task to be moved safely, so here Mutex is used to wrap fut.
     fut: Mutex<Option<BoxFuture<'static, ()>>>,
+    // task is shared both in executor and must be cloned when wake, so here Arc is used.
     sender: Sender<Arc<Task>>,
 }
 
