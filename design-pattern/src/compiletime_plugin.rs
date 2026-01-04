@@ -260,12 +260,11 @@ mod bsc {
 
 #[cfg(test)]
 mod tests {
+    use super::bsc::*;
+    use super::eth::*;
+    use super::node_core::*;
     #[test]
     fn test_node_builder_modularity() {
-        use super::bsc::*;
-        use super::eth::*;
-        use super::node_core::*;
-
         // Compose ETH node
         let node = EthNode::new();
         let eth_node = NodeAdapter::new(EthTypes, node.build_components(node.ctx()));
@@ -275,5 +274,23 @@ mod tests {
         let node = BscNode::new();
         let bsc_node = NodeAdapter::new(BscTypes, node.build_components(node.ctx()));
         bsc_node.launch_node();
+    }
+
+    #[test]
+    fn test_custom_evm() {
+        struct CustomEvm;
+        impl EvmExecutor<EthTypes> for CustomEvm {
+            fn handle_block(&self, block_number: <EthTypes as NodeTypes>::Block) {
+                println!("[ETH-CustomEvm] Handling block {}", block_number);
+            }
+        }
+        let node = EthNode::new();
+        let custom_evm_node = NodeAdapter::new(
+            EthTypes,
+            node.build_components(node.ctx())
+                .build_executor(CustomEvm {}),
+        );
+
+        custom_evm_node.launch_node();
     }
 }
