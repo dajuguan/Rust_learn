@@ -1,3 +1,4 @@
+mod compiletime_plugin;
 mod pipeline;
 mod runtime_plugin;
 
