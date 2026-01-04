@@ -1,17 +1,24 @@
 mod node_core {
     use std::fmt::Debug;
 
+    /// Abstract storage layer.
+    /// Part of "chain semantics": can vary per chain without touching control flow.
     pub trait DBProvider {
         fn get(&self, key: &str) -> String;
         fn set(&self, key: &str, val: String) -> Option<String>;
     }
 
+    /// Type-level description of a chain.
+    ///
+    /// This is the *type anchor* that parameterizes the entire node.
+    /// Control flow depends only on `NodeTypes`, never on concrete chains.
     pub trait NodeTypes {
         type Block: Debug + Copy + From<u32>;
         type ChainSpec;
         type Provider: DBProvider;
     }
 
+    /// Build-time context shared by all components.
     pub struct BuildContext<N: NodeTypes> {
         provider: N::Provider,
     }
@@ -22,14 +29,23 @@ mod node_core {
         }
     }
 
+    /// Execution semantics (EVM, etc).
+    ///
+    /// Replaceable at compile time via trait implementation.
     pub trait EvmExecutor<N: NodeTypes>: Send + Sync {
         fn handle_block(&self, block_number: N::Block);
     }
 
+    /// Consensus semantics.
+    ///
+    /// Again: semantic variability, not control flow.
     pub trait MockConsensus<N: NodeTypes>: Send + Sync {
         fn validate_block(&self, block_number: N::Block) -> bool;
     }
 
+    /// Aggregates *all semantic components* required by the node.
+    ///
+    /// The NodeAdapter only depends on this trait, not on concrete implementations.
     pub trait NodeComponentsTrait<T: NodeTypes>: Send + Sync {
         type Consensus: MockConsensus<T>;
         type Evm: EvmExecutor<T>;
@@ -38,11 +54,15 @@ mod node_core {
         fn evm(&self) -> &Self::Evm;
     }
 
+    /// Concrete component container with Generic to easily replace core components.
+    ///
+    /// Built incrementally using a builder-style API.
     pub struct NodeComponents<Consensus, EVM> {
         consensus: Consensus,
         evm: EVM,
     }
 
+    /// Empty default enables progressive construction.
     impl Default for NodeComponents<(), ()> {
         fn default() -> Self {
             Self {
@@ -52,6 +72,7 @@ mod node_core {
         }
     }
 
+    /// The *compile-time trait* between control flow and semantics.
     impl<Node, Consensus, EVM> NodeComponentsTrait<Node> for NodeComponents<Consensus, EVM>
     where
         Node: NodeTypes,
@@ -71,24 +92,31 @@ mod node_core {
     }
 
     impl<Consensus, EVM> NodeComponents<Consensus, EVM> {
+        /// Replace consensus without touching any control flow.
         pub fn build_consensus<CB>(self, consensus: CB) -> NodeComponents<CB, EVM> {
-            let Self { consensus: _, evm } = self;
+            let Self { evm, .. } = self;
             NodeComponents { consensus, evm }
         }
 
+        /// Replace executor without touching any control flow.
         pub fn build_executor<EB>(self, evm: EB) -> NodeComponents<Consensus, EB> {
-            let Self { consensus, evm: _ } = self;
+            let Self { consensus, .. } = self;
             NodeComponents { consensus, evm }
         }
     }
 
+    /// Chain-specific builder.
+    ///
+    /// This is where composition happens, not execution.
     pub trait NodeComponetsBuilder<Node: NodeTypes> {
         type Components: NodeComponentsTrait<Node>;
 
-        /// returns the created components.
         fn build_components(&self, ctx: &BuildContext<Node>) -> Self::Components;
     }
 
+    /// The *stable control-flow core*.
+    ///
+    /// This struct never changes when chains change.
     pub struct NodeAdapter<N: NodeTypes, C> {
         types: N,
         components: C,
@@ -99,11 +127,15 @@ mod node_core {
         N: NodeTypes,
         C: NodeComponentsTrait<N>,
     {
-        /// simulate backfill
+        /// Simulates historical sync.
+        /// Shared across *all* chains.
         fn back_fill(&self) {
             println!("historical sync done!")
         }
-        /// Simulate engine api for processing a block: validate + handle
+
+        /// Core execution pipeline.
+        ///
+        /// This logic is invariant; only the components vary.
         fn process_block(&self, block_number: N::Block) {
             if self.components.consensus().validate_block(block_number) {
                 self.components.evm().handle_block(block_number);
@@ -116,13 +148,14 @@ mod node_core {
             Self { types, components }
         }
 
-        /// inherit tons of core logics for free!
+        /// Chains inherit complex orchestration "for free".
         pub fn launch_node(&self) {
             self.back_fill();
             self.process_block(0.into());
         }
     }
 
+    /// Dummy provider used by all example chains.
     pub struct MockProvider;
     impl DBProvider for MockProvider {
         fn get(&self, key: &str) -> String {
@@ -281,7 +314,7 @@ mod tests {
         struct CustomEvm;
         impl EvmExecutor<EthTypes> for CustomEvm {
             fn handle_block(&self, block_number: <EthTypes as NodeTypes>::Block) {
-                println!("[ETH-CustomEvm] Handling block {}", block_number);
+                println!("[ETH] CustomEvm] Handling block {}", block_number);
             }
         }
         let node = EthNode::new();
