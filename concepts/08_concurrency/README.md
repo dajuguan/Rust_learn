@@ -19,3 +19,7 @@
 - Arc<T> 的本质是 多线程共享所有权的智能指针。
 - 当你 deref 一个 Arc<T> 时，你得到的是一个 &T。
 - 不是 Deref 语法本身决定的，而是 Arc 的共享语义决定的：Send Arc<T> 必须保证多线程同时访问 &T 时安全，因此要求 T: Sync。
+
+## 数据库trait的Send, Sync 标签设计问题
+Send/Sync 的设计不是 Rust trait 的固有要求，而是由底层数据库访问模式决定的：独占资源可以 Send，多线程共享只读资源可能需要 Sync，但单个读事务通常不能跨线程 Send。
+即底层数据库访问模式决定了是否需要Send/Sync。
