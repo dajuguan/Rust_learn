@@ -12,13 +12,23 @@
 |---------------|------------------|------------------|
 | Rc<T>         | ❌               | ❌               |
 | &mut T        | T: Send          | ❌               |
-| MutexGuard<T> | ❌               | T: Sync          |
+| interior mut types (Cell<T>/ Sender<T>) | T: Send          | ❌               |
+| MutexGuard<T> | ❌              | T: Sync          |
 | Arc<T>        | T: Send + Sync   | T: Send + Sync   |
 
-为什么Arc<T>: Send 要求T: Send外还能Sync？
-- Arc<T> 的本质是 多线程共享所有权的智能指针。
-- 当你 deref 一个 Arc<T> 时，你得到的是一个 &T。
-- 不是 Deref 语法本身决定的，而是 Arc 的共享语义决定的：Send Arc<T> 必须保证多线程同时访问 &T 时安全，因此要求 T: Sync。
+- 为什么Arc<T>: Send 要求T: Send外还要求Sync？
+    - Why T:Send? : 因为drop的时候可能不是同一个thread
+    - Why T:Sync?
+        - Arc<T> 的本质是 多线程共享所有权的智能指针。
+        - 当你 deref 一个 Arc<T> 时，你得到的是一个 &T。
+        - 不是 Deref 语法本身决定的，而是 Arc 的共享语义决定的：Send Arc<T> 必须保证多线程同时访问 &T 时安全，因此要求 T: Sync。
+
+- MutexGuard<T>:不能是Send的原因
+    - lock一般要求只能在一个thread被drop
+    - 一般有thread_local相关的变量都不能是Send
+
+- &mut T: Send，为什么还要求T:send
+    - 因为mem::replace可能在&mut T中把T给替换掉，如果不要求T:Send，在另外一个线程中就有可能直接把&mut mutex给换了并drop了
 
 ## 数据库trait的Send, Sync 标签设计问题
 Send/Sync 的设计不是 Rust trait 的固有要求，而是由底层数据库访问模式决定的：独占资源可以 Send，多线程共享只读资源可能需要 Sync，但单个读事务通常不能跨线程 Send。
