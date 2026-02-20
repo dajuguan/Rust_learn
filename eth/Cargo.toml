@@ -1,0 +1,11 @@
+[package]
+name = "eth"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93.0"
+
+[dependencies]
+alloy = "1.6.3"
+
+[dev-dependencies]
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
