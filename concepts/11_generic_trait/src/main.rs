@@ -6,6 +6,7 @@ mod gat;
 mod generics;
 mod mt_iter;
 mod trait_alias;
+mod trait_impl;
 mod trait_obj;
 
 fn main() {}
