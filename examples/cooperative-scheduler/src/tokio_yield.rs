@@ -106,6 +106,54 @@ fn observe_yields(total: u64) -> Observation {
     })
 }
 
+/// Same always-ready drain as `observe_yields`, but the draining future is
+/// wrapped in `tokio::task::coop::unconstrained`, which opts it OUT of the coop
+/// budget. Without the 128-per-poll cap, `poll_recv` never returns a
+/// budget-forced `Pending`, so the whole channel is drained in a SINGLE poll.
+/// Returns the recv count of each round (expected: one round of everything).
+#[cfg(test)]
+fn observe_unconstrained(total: u64) -> Vec<usize> {
+    use tokio::task::coop::unconstrained;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(async {
+        let (tx, mut rx) = mpsc::unbounded_channel::<u64>();
+        for i in 0..total {
+            tx.send(i).unwrap();
+        }
+        drop(tx);
+
+        let mut rounds = Vec::new();
+        let mut count_in_round = 0usize;
+
+        // `unconstrained(fut).await` runs `fut` with the coop budget disabled.
+        unconstrained(poll_fn(|cx| {
+            loop {
+                match rx.poll_recv(cx) {
+                    Poll::Ready(Some(_)) => count_in_round += 1,
+                    Poll::Ready(None) => {
+                        rounds.push(count_in_round);
+                        return Poll::Ready(());
+                    }
+                    Poll::Pending => {
+                        // With coop disabled this branch is only reached when the
+                        // channel is genuinely empty — never for budget reasons.
+                        rounds.push(count_in_round);
+                        count_in_round = 0;
+                        return Poll::Pending;
+                    }
+                }
+            }
+        }))
+        .await;
+
+        rounds
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +187,26 @@ mod tests {
         assert!(
             obs.neighbor_ticks >= 1,
             "neighbor should have run in the gaps created by coop yields"
+        );
+    }
+
+    /// The coop budget is an opt-out patch, not an iron law. Wrapping a future
+    /// in `unconstrained` disables it: the exact same always-ready drain that
+    /// yielded every 128 polls now runs to completion in ONE poll, no forced
+    /// yields. This is also exactly how you would re-introduce starvation —
+    /// a greedy `unconstrained` future never hands the scheduler a coop yield.
+    #[test]
+    fn unconstrained_disables_the_budget() {
+        let total = COOP_BUDGET as u64 * 3 + 10; // same 394 items as the coop test
+
+        let rounds = observe_unconstrained(total);
+        println!("unconstrained rounds: {rounds:?}");
+
+        // No 128 cap: everything drained in a single poll, one round.
+        assert_eq!(
+            rounds,
+            vec![total as usize],
+            "unconstrained future should drain all items without a budget yield"
         );
     }
 
