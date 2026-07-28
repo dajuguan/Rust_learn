@@ -1,0 +1,14 @@
+[package]
+name = "feature_gate"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 真实项目里这里可能是私有仓库：
+# private-kms = { git = "ssh://git@github.com/company/private-kms.git", optional = true }
+# 为了本地可编译，这里用同目录下的一个模拟 crate 代替
+private-kms = { path = "private-kms", optional = true }
+
+[features]
+default = []
+kms = ["dep:private-kms"]

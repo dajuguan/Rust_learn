@@ -13,6 +13,8 @@ members = [
     "10_closure",
     "11_generic_trait",
     "12_future_pin",
+    "13_feature_gate",
+    "13_feature_gate/private-kms",
 ]
 
 [workspace.dependencies]
