@@ -1,7 +1,9 @@
 # Account-only Reth TrieDB 模拟器设计规格
 
-状态：Draft v0.2  
+状态：Draft v0.3  
 目标：用尽可能少的 Rust 代码，模拟 Reth 2.0 中与账户状态有关的核心机制。本文只定义设计与行为，不包含具体 Rust 实现。
+
+v0.3 变更：确定复用策略——trie 内核与全部密码学/编码管道不再自研，直接复用 `alloy-trie` 与 `reth-trie-sparse`（见第 3 节）；proof 合同从 fork 风格的「fault 上报 + `min_len` 局部证明 + 重试循环」改为 upstream 风格的「预派发多重证明（multiproof）+ sequencer 按序 reveal + provider 兜底」。自研范围收缩到调度系统、存储模拟和 driver。
 
 ## 1. 目标
 
@@ -13,7 +15,7 @@
 4. 在 sparse trie 中完成账户插入、更新和删除，并计算新 state root。
 5. 生成并持久化 trie updates，使 TrieDB 前进到新 root。
 6. 跨 block 保留 sparse trie，模拟 sparse trie cache。
-7. 已缓存路径不再重复读取，只获取缺失部分，模拟 partial proof。
+7. 已请求过 proof 的目标不再重复请求：fetched-target 去重与 EmptyProof 短路，模拟 upstream 的 multiproof 去重语义。
 8. 用 plain-address changeset 和 history index 查询 historical account。
 9. 支持最小 reorg/unwind，并验证 unwind 后 root 和账户状态都正确。
 10. 用单线程、确定性的事件循环模拟 Reth 的 scheduler，明确展示 pending、ready、inflight、completion、drain 和 commit barrier。
@@ -25,9 +27,10 @@ plain account changes
         │
         ├── keccak(address) ──> HashedPostState
         │
-        ├── sparse trie update
-        │       ├── cache hit: 直接更新
-        │       └── cache miss: partial proof -> reveal -> retry
+        ├── 派生 proof targets（fetched-target 去重后派发 multiproof）
+        │
+        ├── sequencer 按序放行 -> reveal -> sparse trie update
+        │       └── 漏网 blinded 节点由 TrieNodeProvider 同步兜底
         │
         ├── new state root + TrieUpdates
         │
@@ -39,6 +42,92 @@ plain account changes
                 └── BlockMeta
 ```
 
+
+### 1.1 Upstream 参照：reth 真实的 `run()` / `make_progress()` 调度
+
+本节记录 reth 上游（2.4.1 时期，`crates/engine/tree/src/tree/state_root_strategy/sparse_trie.rs`）中 `SparseTrieCacheTask` 的实际调度机制，是 8.6/8.8 节模拟策略的原始出处。行号随上游演进会漂移，以函数名为准。
+
+#### 输入通道与消息类型
+
+任务持有两个接收通道，外加一个取消通道：
+
+```text
+updates          — SparseTrieTaskMessage:
+                     HashedState(HashedPostState)   权威状态更新（执行结果）
+                     PrefetchProofs(targets)        prewarm 的 best-effort 预取提示
+                     FinishedStateUpdates           输入结束标记
+proof_result_rx  — ProofResultMessage               proof worker 回传的多重证明（multiproof）结果
+cancel_rx        —                                  取消信号
+```
+
+关键点：proof target 不是外部事件。外部只送状态更新和预取提示，target 是 `update_leaves` 撞到 blinded 节点时在内部产生的。
+
+#### `run()` 的两阶段主循环
+
+```text
+// 阶段一：流式阶段，直到收到 FinishedStateUpdates
+while !finished_state_updates:
+    select_biased! {
+        recv(updates)          => on_message(...)；pending_updates += 1
+        recv(proof_result_rx)  => on_proof_results(...)   // coalesce + reveal
+        recv(cancel_rx)        => return Canceled
+    }
+    done = make_progress()
+
+// 阶段二：排空（draining）阶段，只剩 proof 结果和取消
+while !done:
+    select_biased! {
+        recv(proof_result_rx)  => on_proof_results(...)
+        recv(cancel_rx)        => return Canceled
+    }
+    done = make_progress()
+
+// 收尾：一次性算最终 root
+root_with_updates(new_epoch)
+```
+
+值得注意的语义：
+
+1. `select_biased!` 使 `updates` 通道优先于 proof 结果——先吸收输入，避免生产者阻塞；
+2. 收到的状态更新被 `on_hashed_state_update` 立刻摊平进 `new_account_updates: B256Map<LeafUpdate>`（storage 同理）；`pending_updates` 只是"有几条消息还没被 apply"的计数器，不存数据；
+3. proof 结果有合并（coalesce）优化：`on_proof_results` 收到一条后会把通道里已排队的其余结果全部 `try_recv` 出来合成一个大 multiproof，再一次性 `reveal_decoded_multiproof_v2`，降低每次 reveal 的固定开销（对应 8.6 节 policy 2）；
+4. 收尾时如果 account trie 仍是 blind（整个 block 没改任何状态），直接沿用 parent state root，跳过为算 root 而取 proof。
+
+#### `make_progress()`：背压优先、乐观应用
+
+```text
+fn make_progress():
+    updates_queued = !finished && !updates.is_empty()
+
+    if !updates_queued && proof_result_rx.is_empty():
+        // 两个通道都空 —— 做完整的一轮重活
+        dispatch_pending_targets()          // 把攒下的 target 发给 proof workers
+        process_new_updates()               // 乐观 apply：见下
+        promote_pending_account_updates()   // storage root 就绪的账户提升为 account leaf 更新
+        if finished && 无 pending 更新: return true   // 唯一的终止出口
+        dispatch_pending_targets()
+        ensure_not_stalled()                // 卡死检测：还有活但没有任何在途事件 → 硬错误
+        if proof_result_rx.is_empty():
+            calculate_subtries(new_epoch)   // 真正空闲：预算干净子树的 hash（对应 8.6 policy 7）
+    else if !updates_queued:
+        process_new_updates()               // 只有 proof 结果在排队：apply 后赶紧回去收
+        dispatch_pending_targets()
+    else if pending_targets.len() > chunk_size:
+        dispatch_pending_targets()          // 输入还在涌入：只在攒多时顺手派发（对应 8.6 policy 4）
+    return false
+```
+
+核心是「先乐观应用、缺什么再要什么」，与直觉的「先取 proof 再更新」相反：
+
+1. `process_new_updates` → `trie.update_leaves(updates, callback)`：能用已缓存节点完成的 leaf 更新当场做掉（warm cache 的常态，计入 cache hit 指标）；
+2. 撞到 blinded 的 update 触发 callback，经 `fetched_account_targets: B256Map<ProofV2TargetParent>` 去重——同 key 只有在需要更宽的 parent 覆盖（`parent < entry`，`NONE` 最宽）时才重新请求——然后攒进 `pending_targets`，update 本体被退回 map 等下一轮；
+3. `dispatch_pending_targets` 按 `chunk_size` 切块派发（对应 8.6 policy 5/6 的 chunk 语义）；
+4. proof 结果回来 → reveal → 被退回的 update 在下一次 `process_new_updates` 中补完。
+
+背压设计：只要任一输入通道非空，`make_progress` 就不做重活，尽快回到 `select` 收消息；空闲时反而主动找活干（预算子树 hash），把最终 `root_with_updates` 的临界路径工作提前摊掉。
+
+一句话总结：**优先吸收状态更新摊平成 leaf update map → 空闲时乐观批量 apply，缺节点的 update 退回并去重后批量请求 proof → proof 结果合并 reveal → 退回的 update 下轮补完 → 结束标记后排空在途 proof，一次性算 root。**
+
 ## 2. 非目标
 
 为了把实现规模限制在教学示例范围内，本项目不实现：
@@ -49,24 +138,48 @@ plain account changes
 - EVM 交易执行；调用方直接提供每个 block 的账户变更；
 - MDBX、RocksDB、Static Files 或数据库事务引擎；全部用内存容器模拟；
 - Tokio、真实线程池、Rayon 并行和真实 channel；本示例保留等价的单线程事件队列和模拟 proof worker，以展示调度语义；
+- 自研 MPT 节点编码、hex-prefix、RLP、根哈希计算和 sparse trie 内核；这些全部复用 `alloy-trie` 与 `reth-trie-sparse`；
+- fork 特有的 Proof V2 `min_len` 后缀证明语义；本示例采用 upstream 的整条路径 multiproof + 目标级去重；
 - trie node 的生产级压缩格式、磁盘 codec 和性能优化；
 - fork choice、多条并行 fork 和长期非 canonical block 保存；
 - archive node 的完整持久化生命周期。
 
 账户 trie 和 storage trie 在“hashed key、proof、局部 reveal、dirty ancestor 重算”方面同构，但并非完全等价。storage 还有嵌套 root、整组 wipe 和 preimage 等额外问题，本示例不覆盖这些差异。
 
-## 3. 与真实 Reth 的对应关系
+## 3. 复用策略与真实 Reth 的对应关系
+
+### 3.1 复用清单
+
+| 来源 | 直接复用 | 用途 |
+|---|---|---|
+| `alloy-trie` | `Nibbles`、`TrieNode`、RLP 编解码、hex-prefix、`EMPTY_ROOT_HASH` | 全部编码与密码学管道 |
+| `alloy-trie` | `HashBuilder` | full-rebuild oracle：全量叶子有序流重算 root |
+| `alloy-trie` | `HashBuilder` + `ProofRetainer` | proof 生成：从有序叶子流收集目标路径节点，公共节点天然去重 |
+| `alloy-trie` | `proof::verify_proof` | 测试中校验/篡改 proof |
+| `reth-trie-sparse` | `SerialSparseTrie`（实现 `SparseTrieInterface`） | sparse trie 内核：blind/reveal/update/remove/root/updates |
+
+自研的只有三块：**调度器**（事件循环、sequencer、去重、终止条件）、**存储模拟**（`StateDb` 各表、changeset、history）和 **driver**（`BlockInput` 展开为事件、root 校验、原子 commit）。
+
+作为使用方的集成面刻意保持最小：
+
+- 实现一个单方法 trait：`TrieNodeProvider::trie_node(path) -> Result<Option<RevealedNode>>`；第一版可用库自带的 `DefaultTrieNodeProvider`（永远返回 `None`，即「无兜底」）占位；
+- 调用 `SerialSparseTrie` 的六个方法：`with_root` / `reveal_nodes` / `update_leaf` / `remove_leaf` / `root` / `take_updates`；接口上其余方法不使用即等于不存在；
+- 不写 facade、不写适配层；出现第二个实现前不做抽象。
+
+版本对齐：`alloy-trie` 版本必须与 `reth-trie-sparse` 所属 reth workspace 咬合，建议以 git dependency 指向 reth 仓库同一 tag。若日后需要 trie 内核并行，`ParallelSparseTrie`（reth-trie-sparse-parallel）实现同一 trait，可零重构替换；本示例不使用——内核内部并行与调度系统正交。
+
+### 3.2 概念对应表
 
 | 本示例 | Reth 2.0 中的概念 | 说明 |
 |---|---|---|
 | `HashedAccounts` | MDBX `HashedAccounts` | canonical latest account state |
 | `TrieDb` | MDBX `AccountsTrie` + hashed account cursor | proof 和持久化 trie 节点的数据源 |
 | `HashedPostState` | `HashedPostState` | 当前 block 的 hashed account diff |
-| `SparseTrie` | `SparseStateTrie<ConfigurableSparseTrie>` 的 account 部分 | 当前默认底层是 arena parallel trie；本示例做单线程版本 |
+| `SerialSparseTrie`（直接复用） | upstream `reth-trie-sparse` 同一类型 | 生产引擎的 account trie 用并行实现（`ParallelSparseTrie`），接口相同 |
 | `SparseTrieCache` | `PreservedSparseTrie` + task 的 reuse/prune 路径 | 跨 block 复用已经 reveal 的节点 |
-| `TrieScheduler` | `SparseTrieCacheTask::run` | 唯一状态 owner；接收事件、推进依赖、派发 proof work、判断 drain |
-| `SimulatedProofWorker` | account proof worker pool | 同步执行 proof work，再以 completion event 返回；不直接修改 sparse trie |
-| `ProofTarget(key, min_len)` | `ProofV2Target` | 只保留 node path 深度不小于 `min_len` 的目标相关 proof nodes |
+| `TrieScheduler` | upstream `MultiProofTask` + `SparseTrieTask` 的单线程合并 | 唯一状态 owner；派生 targets、去重、派发、sequencer 排序、reveal、apply、判断 drain |
+| `SimulatedProofWorker` | account proof worker pool | 用 `HashBuilder` + `ProofRetainer` 同步执行，再以 completion event 返回；不直接修改 sparse trie |
+| `ProofTargets`（hashed key 集合） | upstream `MultiProofTargets` | 目标级去重；不采用 fork 的 `min_len` 后缀语义 |
 | `TrieUpdates` | account trie updates | dirty nodes 的 upsert/delete 集合 |
 | `AccountChangeSets` | account changeset static files | 本示例用按 block 排列的内存 vector |
 | `AccountHistory` | RocksDB account history index | 本示例用 `address -> sorted blocks` |
@@ -118,15 +231,9 @@ plain account changes
 - `Extension`：公共 path prefix 和单个 child reference；
 - `Branch`：最多 16 个 child references。本示例的 key 固定为 64 nibbles，因此 branch value 恒为空。
 
-节点编码和引用规则应遵循 Ethereum MPT：
+节点编码和引用规则遵循 Ethereum MPT（hex-prefix compact encoding、RLP、小于 32 字节 inline reference、标准 root hash、empty trie root），但**全部由 `alloy-trie` 提供，本项目一行不实现**。
 
-- leaf/extension path 使用 hex-prefix compact encoding；
-- node 使用 RLP；
-- encoded node 小于 32 字节时允许 inline reference，否则使用 Keccak hash；
-- trie root 使用标准 root hash；
-- 空 trie root 使用 Ethereum empty trie root。
-
-这样可以用“从所有 `HashedAccounts` 全量重建 trie”作为独立 reference implementation，验证 sparse update 得到的 root。若第一阶段只想验证 cache/proof 控制流，可以临时采用“所有节点都 hash”的 toy 模式，但必须显式命名为非 Ethereum-compatible，且不能把结果称为 Ethereum state root。
+reference implementation 同样是白拿的：把全量 `HashedAccounts` 按 hashed key 排序后喂给 `HashBuilder` 重算 root，约二十行，作为 sparse update 结果的对拍 oracle。由于编码管道现成，v0.2 中「所有节点都 hash 的 toy 模式」降级路径不再需要，删除。
 
 ## 6. 内存数据库布局
 
@@ -152,7 +259,7 @@ NibblePath -> PersistedTrieNode
 CurrentRoot -> StateRoot
 ```
 
-第一版允许保存完整 encoded MPT nodes。它是由 `HashedAccounts` 派生出的 Merkle index，不是账户状态的第二个 canonical source。
+第一版允许保存完整 encoded MPT nodes。它是由 `HashedAccounts` 派生出的 Merkle index，不是账户状态的第二个 canonical source。proof 生成不依赖节点表：直接用 `HashBuilder` + `ProofRetainer` 遍历有序 `HashedAccounts` 构造，multiproof 的公共节点去重由 `ProofRetainer` 天然保证；节点表主要用于演示 `TrieUpdates` 的持久化推进。
 
 必须提供：
 
@@ -249,9 +356,9 @@ TrieScheduler = (State, Events, Transitions, Readiness, Policy, Commit)
 
 | 维度 | 本示例中的定义 |
 |---|---|
-| `State` | block generation、working sparse trie、new/pending updates、proof targets、inflight work、completed results、finish 标记 |
+| `State` | block generation、working sparse trie、fetched targets、inflight work、sequencer 缓冲、finish 标记 |
 | `Events` | begin block、account update、prefetch、finish、proof completed、cancel |
-| `Transitions` | hash、尝试 apply、blind fault、dispatch、reveal、retry、root、prepare、commit |
+| `Transitions` | hash、派生 targets、去重、dispatch、sequencer 放行、reveal、apply（provider 兜底）、root、prepare、commit |
 | `Readiness` | proof 依赖是否满足、worker capacity 是否可用、输入是否已结束、所有 work 是否 drain |
 | `Policy` | 事件优先级、proof target 去重、chunk size、completion coalescing、prefetch |
 | `Commit` | sparse root、full-rebuild oracle 和 expected root 一致后原子 publish |
@@ -262,6 +369,7 @@ TrieScheduler = (State, Events, Transitions, Readiness, Policy, Commit)
 Correctness:
     blind 不能当作不存在
     stale proof 不能 reveal
+    state 变更必须按 sequence number 顺序应用
     root 不一致不能 commit
 
 Policy:
@@ -284,12 +392,10 @@ SchedulerState {
     parent_root,
     working_trie,
     final_hashed_state,
-    new_updates,
-    pending_updates,
-    pending_targets,
     fetched_targets,
+    next_sequence,
     inflight_proofs,
-    completed_proofs,
+    sequencer,          // 乱序 completion 的重排序缓冲
     finished_updates,
     prepared_block,
 }
@@ -347,14 +453,14 @@ FinishUpdates { generation }
 
 ProofCompleted {
     generation,
-    work_id,
+    sequence,
     result,
 }
 
 CancelBlock { generation }
 ```
 
-`generation` 标识这批异步工作依赖的 parent state。即使第一版同步执行，也必须保留该字段并测试 stale completion：reorg/cancel 后到达的旧 proof result 应直接丢弃，不能 reveal 到新 root 的 cache。
+`generation` 标识这批异步工作依赖的 parent state。即使第一版同步执行，也必须保留该字段并测试 stale completion：reorg/cancel 后到达的旧 proof result 应直接丢弃，不能 reveal 到新 root 的 cache。`sequence` 是派发时领取的序号，sequencer 依赖它做连续段放行。
 
 为了保持输入简单，`BlockInput.account_changes` 仍规定同一地址只有一个最终值。driver 负责将 `BlockInput` 展开为：
 
@@ -373,36 +479,34 @@ prefetch event 是可选的；它只生成 touched/read-only target，不得改�
 ```text
 Received
   -> Hashed
-  -> PendingApply
-  -> BlockedOnProof
-  -> ProofInFlight
-  -> Revealed
-  -> Applied
+  -> TargetsDerived        // 与 fetched_targets 求差
+  -> ProofInFlight         // 差集为空时走 EmptyProof 短路，跳过此态
+  -> Sequenced             // 在 sequencer 中等待连续段
+  -> Revealed + Applied    // reveal multiproof 后按序 apply；漏网 blind 由 provider 兜底
   -> RootComputed
   -> Validated
   -> Committed
 ```
 
-它不一定每次经过所有状态：warm-cache update 可以从 `PendingApply` 直接到 `Applied`；预先 hash 的输入可以跳过 `Hashed`；proof result 可能一次解除多个共享 prefix 的 updates。
+预先 hash 的输入可以跳过 `Hashed`；目标全部取过的 update 走 EmptyProof 短路，跳过 `ProofInFlight`（但仍占 sequence number、仍经 sequencer）。
 
 集合之间的转换为：
 
 ```text
-new_updates
-    │ process_new_updates
-    ▼
-pending_updates ── hit blind ──> pending_targets
-    │                                │ dispatch if ready/capacity
-    │ apply success                  ▼
-    ▼                           inflight_proofs
-  removed                            │ ProofCompleted
-                                     ▼
-                              completed_proofs
-                                     │ verify + reveal
-                                     └──────> retry pending_updates
+state update
+    │ hash + 与 fetched_targets 求差
+    ├── 差集为空 ──> EmptyProof(seq) ────────────┐
+    │ 差集非空：领 seq、登记 fetched_targets      │
+    ▼                                           ▼
+inflight_proofs ── ProofCompleted(seq) ──> sequencer
+                                             │ 连续段就绪
+                                             ▼
+                              reveal multiproof + 按序 apply
+                                             │ 撞到漏网 blind
+                                             └─> provider 同步兜底（miss = 硬错误）
 ```
 
-成功 apply 的 update 必须从 `pending_updates` 删除；被 blind 阻挡的 update 必须保留。proof 返回后重试同一批 remaining updates，而不是重新处理已经成功的项。
+与 fork 风格不同，这里没有 fault 上报和重试循环：`SerialSparseTrie::update_leaf` 撞到 blinded 节点时通过传入的 `TrieNodeProvider` 同步取数，对调度器透明。调度器要守住的是另一件事：**同一账户被多个 sequence 触及时，应用顺序必须等于 sequence 顺序**（后面的值覆盖前面的），这由 sequencer 只放行连续段保证；而 reveal 是幂等可交换的，proof 计算本身可以乱序并行。
 
 ### 8.5 Readiness 规则
 
@@ -410,10 +514,10 @@ pending_updates ── hit blind ──> pending_targets
 
 | 工作 | Ready 条件 |
 |---|---|
-| apply leaf update | update 已 hash，目标路径没有未知 blind boundary |
-| dispatch proof | target 尚未 fetched/inflight，且 inflight 数小于 `max_inflight_proofs` |
-| reveal proof | completion generation 等于 current generation，proof boundary/hash 验证通过 |
-| compute root | `FinishUpdates` 已收到，pending/new updates 为空，pending/inflight/completed proofs 均为空 |
+| dispatch proof | 目标与 `fetched_targets` 的差集非空，且 inflight 数小于 `max_inflight_proofs` |
+| EmptyProof 短路 | 目标已全部出现在 `fetched_targets` |
+| reveal + apply | completion generation 等于 current generation，且 sequence 与已放行前缀连续 |
+| compute root | `FinishUpdates` 已收到，派发数等于回收数，sequencer 为空 |
 | prepare commit | root 已计算，TrieUpdates 和 changeset 已生成，full-rebuild oracle 通过 |
 | atomic commit | expected root（若提供）匹配，cache anchor 仍等于 parent root |
 
@@ -497,11 +601,8 @@ while !scheduler.terminal():
 
 ```text
 finished_updates
-&& new_updates.is_empty()
-&& pending_updates.is_empty()
-&& pending_targets.is_empty()
-&& inflight_proofs.is_empty()
-&& completed_proofs.is_empty()
+&& dispatched_count == completed_count
+&& sequencer.is_empty()
 ```
 
 只有 drain 后才能计算最终 root。root 计算成功也不是 commit：必须再通过 expected root/full-rebuild oracle，最后 clone-and-swap 数据库和 cache。
@@ -511,38 +612,26 @@ finished_updates
 - invalid proof：block 失败，working trie 丢弃，DB/cache anchor 不变；
 - stale completion：静默丢弃并增加 metric；
 - wrong parent root：拒绝 `BeginBlock`；
-- cancel/reorg：generation 前进，清空 pending/inflight bookkeeping，以新 parent root 冷启动；
-- 输入结束但仍有无法解除且没有 inflight work 的 pending update：报告 scheduler deadlock/error，不能无限循环。
+- cancel/reorg：generation 前进，清空 inflight/sequencer bookkeeping，以新 parent root 冷启动；
+- apply 阶段 provider miss：硬错误，block 失败。
 
-这个 deadlock 检查非常重要：每次 reveal/retry 要么减少 pending updates，要么产生此前未请求的 proof target，否则说明状态机没有进展。
+在 upstream 合同下，v0.2 的 no-progress/deadlock 检查退化为最后这条硬规则：不存在可自旋的重试循环，proof 覆盖不足会在 apply 时立即以 provider miss 暴露，说明 target 派生或 proof 生成有 bug。
+
 
 ## 9. Sparse trie 表示
 
-Sparse trie 不需要展开整棵 trie。未展开子树只保存一个承诺 hash。
+Sparse trie 不需要展开整棵 trie。未展开子树只保存一个承诺 hash。**本节是行为语义与库概念的对照，不是实现规格——`SerialSparseTrie` 已实现全部语义。**
 
-### 9.1 Sparse node
+### 9.1 Sparse node（映射到 `reth-trie-sparse` 的 `SparseNode`）
 
-节点分成以下逻辑状态：
+| 逻辑状态 | 库中对应 |
+|---|---|
+| `Empty`（已知为空） | `SparseNode::Empty` |
+| `RevealedLeaf` / `RevealedExtension` / `RevealedBranch` | `SparseNode::Leaf` / `Extension` / `Branch` |
+| `Blinded(hash)`（只知子树 hash） | `SparseNode::Hash` |
+| `Dirty` / `Clean`（cached hash 失效/有效） | 节点内 `hash: Option<B256>` 的 `None` / `Some` |
 
-- `Empty`：已知为空；
-- `RevealedLeaf`：已知完整 suffix 和 leaf value；
-- `RevealedExtension`：已知 prefix 和 child；
-- `RevealedBranch`：已知 child presence；每个 child 可以继续 revealed，也可以 blinded；
-- `Blinded(hash)`：只知道子树 hash，不知道内部结构；
-- `Dirty`：节点或后代被本轮变更影响，cached RLP/hash 已失效；
-- `Clean`：cached RLP/hash 与当前内容一致。
-
-`Blinded(hash)` 不是“数据不存在”，而是“数据存在性及内容未知，但其 Merkle commitment 已知”。因此：
-
-```text
-lookup 返回 None
-```
-
-不能同时表达“不存在”和“尚未 reveal”。lookup 必须区分：
-
-- `Exists(value)`；
-- `NonExistent`；
-- `BlockedByBlind { path, hash }`。
+`Blinded(hash)` 不是“数据不存在”，而是“数据存在性及内容未知，但其 Merkle commitment 已知”。因此 lookup 返回 `None` 不能同时表达“不存在”和“尚未 reveal”——库的 `find_leaf` 已区分这三种结果：`LeafLookup::Exists`、`LeafLookup::NonExistent`、`Err(LeafLookupError::BlindedNode { path, hash })`。
 
 ### 9.2 Cache anchor
 
@@ -574,89 +663,41 @@ proof 必须以 `parent_root` 对应的已提交 TrieDB 为数据源，不能从
 
 ### 10.2 Proof target
 
-当 update 遇到 blinded node 时产生：
+采用 upstream 的目标级语义：target 就是 hashed account key 的集合（对应 `MultiProofTargets` 的 account 部分）。
 
-```text
-ProofTarget {
-    key: HashedAddress,
-    min_len: minimum retained proof-node path length
-}
-```
+- 从 state update 派生：本批触及的所有 hashed keys 与 `fetched_targets` 求差；
+- 差集为空时不派发 proof，走 EmptyProof 短路；
+- 不采用 fork 的 `(key, min_len)` 后缀语义。「不重复取」的粒度是整个 target，而非节点后缀：首次取回的 proof 可能包含 sparse trie 已 reveal 的浅层节点，重复 reveal 是幂等无害的。
 
-- 普通 full target/prefetch 可以使用 `min_len = 0`，允许保留 root；
-- update 在逻辑 branch path 深度 `d` 遇到 blind 时，使用 `min_len = min(d + 1, 64)`；
-- proof builder 为构造边界可能仍从 `min_len - 1` 的父 branch 开始，但不会重复返回更浅且 cache 已知的节点；
-- 同一个 key 重复请求时，只保留 `min_len` 更小、覆盖范围更大的请求；
-- 多个 key 共享路径时，proof builder 必须去重公共节点。
+### 10.3 Multiproof 与去重
 
-### 10.3 Partial proof 的定义
+一次 dispatch 为一批 targets 生成一个多重证明（multiproof）：用 `HashBuilder` + `ProofRetainer` 遍历 parent state 的有序叶子，多个 key 共享的路径节点只返回一次（`ProofRetainer` 天然去重）。
 
-传统 full proof 返回 root 到目标 leaf/non-existence boundary 的完整路径。partial proof 只返回 cache 尚未 reveal 的后缀：
+reveal 前必须验证：
 
-```text
-already revealed prefix
-        │
-        └── expected blinded hash H
-                    │
-                    └── partial proof nodes
-                              └── target leaf / exclusion boundary
-```
+1. proof 节点能重建出 parent root，或与 sparse trie 中对应 blinded boundary 的 hash 一致；
+2. inclusion proof 的 leaf value 与 parent-state `HashedAccounts` 一致；
+3. exclusion proof 确实在 empty child 或不同 leaf 处终止；
+4. proof 不得与 cache 中已 reveal 的节点内容冲突。
 
-partial proof reveal 前必须验证：
+如果验证失败，整个 block 失败，cache 和数据库都不得前进。（本项目的 proof 由自己的 TrieDb/flat store 生成，验证逻辑主要服务于篡改测试场景 H。）
 
-1. 返回节点能够重建出 blinded boundary 的 expected hash `H`；
-2. proof path 与 target key 一致；
-3. inclusion proof 的 leaf value 与 parent-state `HashedAccounts` 一致；
-4. exclusion proof 确实在 empty child 或不同 leaf 处终止；
-5. proof 不得覆盖 cache 中已经 reveal 且内容冲突的节点。
+### 10.4 删除时的 blinded sibling
 
-如果验证失败，整个 block 失败，cache 和数据库都不得前进。
+删除 leaf 可能让 branch 只剩一个 child 触发 collapse；若剩余 sibling 是 blinded，必须先 reveal 其结构才能决定压缩后的 extension/leaf path。
 
-### 10.4 删除时的额外 proof
-
-删除 leaf 可能让 branch 只剩一个 child，从而触发 branch collapse。若剩余 sibling 是 blinded，仅知道它的 hash 不一定足以决定压缩后的 leaf/extension path，因此必须继续请求该 sibling 的结构。
-
-所以 proof target 不只来自“目标 key 路径被 blinded”，还可能来自“结构压缩需要 reveal blinded sibling”。update 必须允许多轮：
-
-```text
-apply updates
-    -> blocked targets
-fetch/reveal partial proofs
-    -> retry remaining updates
-    -> 可能产生新的 collapse target
-fetch/reveal
-    -> retry
-    -> complete
-```
-
-循环必须保证有进展：每轮至少 reveal 一个此前 blinded 的 boundary，否则返回错误，防止无限循环。
+在 upstream 合同下这对调度器完全透明：`SerialSparseTrie::remove_leaf` 内部通过传入的 `TrieNodeProvider` 同步取回 sibling 节点。本项目只需保证 provider 能按 path 出具单节点 proof（同样用 `HashBuilder` + `ProofRetainer` 实现）。不存在 fork 风格「collapse 产生新 target、多轮 fetch/retry」的循环。
 
 ## 11. Sparse trie update 算法
 
-输入是按 `HashedAddress` 排序的 `HashedPostState`。
+插入/更新/删除、Patricia normalization、dirty 重算和 root 计算**全部由 `SerialSparseTrie` 提供，本项目不实现**。调用方合同收缩为：
 
-每个 leaf update 有两种操作：
+1. 输入按 `HashedAddress` 排序（保证 deterministic 输出顺序；map 迭代顺序不得影响结果）；
+2. `Set(encoded_account)` 调 `update_leaf`，`Delete` 调 `remove_leaf`；同一批内删除延后到全部插入/更新之后（沿用 upstream 的 deferred removals：避免中间分支先删后建）；
+3. 两个调用都传入 `TrieNodeProvider`；apply 阶段 provider miss 视为硬错误；
+4. 全部应用后调 `root()` 取新根、`take_updates()` 取 `TrieUpdates`。
 
-- `Set(encoded_account)`：账户插入或更新；
-- `Delete`：账户删除。
-
-更新规则：
-
-1. 沿 64-nibble key 向下查找。
-2. 遇到 blinded node 时，不猜测其内部结构；保留该 update，输出 proof target。
-3. 更新已有 leaf 时替换 value，并将所有 ancestor 标为 dirty。
-4. 插入不存在 leaf 时，在第一个分叉 nibble 创建 extension/branch/leaf 组合。
-5. 删除不存在账户是 no-op，但必须已有 exclusion knowledge；不能把 blind 当作不存在。
-6. 删除 leaf 后执行 Patricia normalization：
-   - 空 branch 删除；
-   - 单 child branch 与 child 合并为 extension 或 leaf；
-   - 相邻 extension 合并；
-   - 必要时为 blinded sibling 请求额外 proof。
-7. 所有 update 完成后，自底向上重新 RLP encode/hash dirty nodes。
-8. revealed 但未变化的 clean subtree 复用 cached reference；blinded subtree直接复用 commitment hash。
-9. 输出 `new_root` 和 `TrieUpdates`。
-
-批量更新必须与逐个更新得到相同 root，但输出顺序必须 deterministic。map 或 hash map 的迭代顺序不得影响结果。
+行为要求保持不变并由测试守住：批量更新与逐个更新得到相同 root；删除不存在账户是 no-op，但必须已有 exclusion knowledge，不能把 blind 当作不存在。
 
 ## 12. TrieUpdates
 
@@ -678,7 +719,7 @@ TrieUpdates {
 - 应用 updates 后，从 TrieDB 生成的 proof 必须对应 `new_root`；
 - `new_root` 必须等于 sparse trie root，也必须等于 full rebuild root。
 
-如果第一版 `TrieDb` 保存完整 encoded nodes，`TrieUpdates` 可以直接记录这些 node 的最终形态。以后换成 Reth-like compact branch nodes 时，外部 commit 协议保持不变。
+`TrieUpdates` 直接采用 `take_updates()` 返回的 `SparseTrieUpdates`（`BranchNodeCompact` 的 upserts 与 removed paths），不再自定义格式。`TrieDb` 的持久化节点表相应保存 compact branch nodes 或完整 encoded nodes 均可，外部 commit 协议不变。
 
 ## 13. Sparse trie cache 生命周期
 
@@ -705,16 +746,12 @@ block commit 成功后：
 
 ### 13.3 Cache pruning
 
-这里的 pruning 是内存 cache pruning，不是 historical pruning。最小实现采用确定性规则，例如：
+这里的 pruning 是内存 cache pruning，不是 historical pruning。注意 `SerialSparseTrie` **没有**「把冷子树折叠回 blinded」的 API（fork 的 arena 实现才有），因此最小实现二选一：
 
-- cache node 数量不超过 `max_cached_nodes`；
-- 超限时选择最久未访问且本轮不 dirty 的 revealed subtree；
-- 用该 subtree 当前 hash 替换为 `Blinded(hash)`；
-- 不得改变 trie root；
-- 不得 prune root 到无法保留 anchor commitment；
-- dirty subtree 在 commit 前不得 prune。
+- 不做容量 pruning，cache 在示例运行期内自然增长（教学示例可接受）；
+- 超过 `max_cached_nodes` 时丢弃整棵 cache，下一 block 以新 root 冷启动（等价于粗粒度全量 prune）。
 
-为了保持第一版简单，可以先关闭容量 pruning，只验证跨 block 复用；第二阶段再加入上述策略。
+无论哪种，都必须保持：root 不受影响、dirty 状态不跨 commit 存活、cache 的存在与否只影响 proof I/O 量而不影响任何结果。
 
 ### 13.4 Reorg
 
@@ -738,8 +775,8 @@ Prepare 不修改持久化内存 DB：
 1. 校验 block number 和 parent root。
 2. 从 `HashedAccounts` 读取 before values，构造 plain-address changeset。
 3. 将 address changes hash 成 `HashedPostState` 并排序。
-4. 在 cache 的 working copy 上尝试 sparse updates。
-5. 按需循环 fetch partial proof、verify、reveal、retry。
+4. 派生 proof targets、去重后派发 multiproof，结果经 sequencer 按序 verify + reveal 到 cache 的 working copy。
+5. 按序 apply leaf updates；漏网 blinded 节点由 provider 同步兜底。
 6. 计算 `new_root` 和 `TrieUpdates`。
 7. 在 `HashedAccounts` 的临时副本上应用 `HashedPostState`，再用 full rebuild oracle 校验 root；测试构建中必须执行，普通运行可配置关闭。
 
@@ -864,9 +901,13 @@ TrieDb.root
 
 拥有持久化 trie 视图；负责 proof generation、应用 trie updates 和 full rebuild oracle。
 
-### `SparseTrie`
+### `SparseTrie`（复用，不实现）
 
-只理解 hashed path、revealed/blinded nodes、leaf updates、proof reveal、root 和 trie updates；不知道 address、block 和 history。
+即 `reth_trie_sparse::SerialSparseTrie`。只理解 hashed path、revealed/blinded nodes、leaf updates、proof reveal、root 和 trie updates；不知道 address、block 和 history。本项目只调用其六个方法，不包 facade。
+
+### `FlatStoreProvider`
+
+实现 `TrieNodeProvider` 单方法 trait：按 path 从 parent-state 数据出具单节点证明，作为 apply 阶段撞到漏网 blinded 节点时的同步兜底。第一版可用库自带的 `DefaultTrieNodeProvider`（永远 miss）占位，此时调度器必须保证 multiproof 预取全覆盖。
 
 ### `SparseTrieCache`
 
@@ -874,11 +915,11 @@ TrieDb.root
 
 ### `TrieScheduler`
 
-当前 block working trie 和调度集合的唯一 owner；负责事件转换、readiness、proof target 去重、inflight bookkeeping、completion reveal、retry、drain 与 commit candidate 生成。
+当前 block working trie 和调度集合的唯一 owner；负责事件转换、readiness、proof target 去重、inflight bookkeeping、completion 排序（sequencer）、reveal、apply、drain 与 commit candidate 生成。
 
 ### `SimulatedProofWorker`
 
-只从 parent-state `TrieDb` 读取并执行 `ProofRequest -> ProofResult`。它不读取未提交 post-state，也不直接修改 scheduler/cache。
+用 `HashBuilder` + `ProofRetainer` 从 parent-state 有序叶子同步构造 multiproof，执行 `ProofRequest -> ProofResult`。它不读取未提交 post-state，也不直接修改 scheduler/cache——结果必须包装成 completion 事件交回调度器。
 
 ### `BlockProcessor`
 
@@ -906,9 +947,9 @@ TrieDb.root
 10. invalid proof、错误 parent root 或 prepare 失败不会产生部分 commit。
 11. working sparse trie 只有 `TrieScheduler` 一个 mutable owner；worker completion 只能通过事件应用。
 12. 任一 `ProofCompleted.generation` 必须匹配 current generation，否则不得 reveal。
-13. 收到 `FinishUpdates` 后仍必须 drain pending/inflight/completed work，不能提前求根。
+13. 收到 `FinishUpdates` 后仍必须等派发的 proof 全部回收、sequencer 清空，不能提前求根。
 14. 改变事件到达顺序、proof completion 顺序、`chunk_size` 或 worker capacity，不改变最终 root 和 DB 内容。
-15. 每次 retry 必须减少 pending work 或产生一个此前未请求的 target；否则返回 deadlock/no-progress 错误。
+15. apply 阶段 provider miss 视为硬错误立即失败；调度器中不存在可自旋的重试循环。
 
 ## 21. 验收场景
 
@@ -922,9 +963,8 @@ TrieDb.root
 ### B. Cold-cache account update
 
 - 修改一个现有账户；
-- 第一次 update 被 root blind 阻塞；
-- 获取并 reveal proof；
-- retry 成功；
+- 调度器为其派生 target、派发 multiproof、经 sequencer 放行并 reveal；
+- apply 全程不触发 provider 兜底（proof 覆盖完整）；
 - sparse root 等于 full rebuild root。
 
 ### C. Warm-cache update
@@ -933,12 +973,12 @@ TrieDb.root
 - 不需要完整 root-to-leaf proof；
 - proof node 数少于 cold run，理想情况下为零。
 
-### D. Partial proof
+### D. 已取目标短路（EmptyProof）
 
-- 修改一个与已缓存账户共享部分 prefix、随后进入 blinded subtree 的账户；
-- target 的 `min_len > 0`；
-- proof 不重复返回已 reveal prefix；
-- reveal 后 root 正确。
+- 同一 block 内两批 state update 触及同一账户；
+- 第二批与 `fetched_targets` 求差后为空，不派发 proof，走 EmptyProof；
+- EmptyProof 仍占 sequence number 并经 sequencer 按序应用；
+- root 正确，该账户的 proof 派发计数为 1。
 
 ### E. Multiproof 去重
 
@@ -955,9 +995,9 @@ TrieDb.root
 ### G. Delete and branch collapse
 
 - 删除一个使 branch 只剩单 child 的账户；
-- 若 sibling blinded，第一次 update 请求额外 proof；
-- reveal 后 extension/leaf normalization 正确；
-- obsolete trie paths 出现在 `TrieUpdates.deletes`。
+- 若 sibling blinded，`remove_leaf` 通过 provider 同步取回 sibling（断言 provider 被调用）；
+- normalization 后 extension/leaf 正确；
+- obsolete trie paths 出现在 `TrieUpdates` 的 removed paths。
 
 ### H. Invalid proof
 
@@ -985,12 +1025,11 @@ TrieDb.root
 - floor 及之后查询保持正确；
 - latest state 和 state root 完全不受影响。
 
-### L. Cache pruning
+### L. Cache 丢弃与冷启动
 
-- reveal 多个 subtree 后执行 cache pruning；
-- node 数下降；
-- root 不变；
-- 再次访问被 blind 的 subtree 时触发 partial proof 并成功恢复。
+- 多个 block 后主动丢弃整棵 cache（模拟容量上限触发的粗粒度 prune）；
+- 下一 block 冷启动，root 与 warm 路径完全一致；
+- proof 派发数与 reveal 节点数显著高于 warm block，证明 cache 只影响 proof I/O，不影响结果。
 
 ### M. Out-of-order proof completion
 
@@ -1009,7 +1048,7 @@ TrieDb.root
 
 - 在 proof inflight 时发送 `FinishUpdates`；
 - scheduler 不得立即计算 root；
-- completion reveal、pending update retry 完成后才进入 `RootComputed`。
+- 所有 completion 经 sequencer 放行、reveal + apply 完成后才进入 `RootComputed`。
 
 ### P. Backpressure and chunking
 
@@ -1017,11 +1056,11 @@ TrieDb.root
 - inflight 数始终不超过限制；
 - dispatch 数量可以变化，但 root 和 commit 内容不变。
 
-### Q. No-progress detection
+### Q. Provider miss 硬错误
 
-- 构造一个 reveal 后仍返回相同 target、且没有新增信息的错误 proof builder；
-- scheduler 返回 no-progress/deadlock 错误；
-- 不进入无限循环，不修改 DB/cache anchor。
+- 构造覆盖不完整的 multiproof，且 provider 使用 `DefaultTrieNodeProvider`（永远 miss）；
+- apply 撞到漏网 blinded 节点时立即返回错误；
+- block 失败，不进入无限循环，不修改 DB/cache anchor。
 
 ## 22. 可观测性
 
@@ -1032,7 +1071,7 @@ TrieDb.root
 - proof target 数；
 - 返回的 proof node 数；
 - reveal node 数；
-- update retry 轮数；
+- provider 兜底调用次数；
 - event 数以及按类型分类的计数；
 - pending/ready/inflight/completed 队列高水位；
 - proof chunk 数、每个 chunk 的 target 数；
@@ -1047,13 +1086,12 @@ TrieDb.root
 
 ## 23. 推荐实现顺序
 
-### Phase 1：正确的完整 MPT
+### Phase 1：接线 alloy-trie（天级，不是周级）
 
-- Account RLP；
-- hashed address 和 nibble path；
-- full trie build/root；
-- inclusion/exclusion proof；
-- 内存 TrieDB。
+- Account RLP 编码（`alloy_trie::TrieAccount` 或手写四元组）；
+- 有序 `HashedAccounts` + `HashBuilder` full-rebuild oracle；
+- `HashBuilder` + `ProofRetainer` 生成 multiproof，并用 `proof::verify_proof` 自检；
+- 内存 TrieDB（root 记录 + `TrieUpdates` 应用）。
 
 ### Phase 2：确定性事件循环骨架
 
@@ -1064,22 +1102,20 @@ TrieDb.root
 - readiness、backpressure、drain 和 no-progress 检查；
 - 先用假的 proof/result 跑通状态转换测试。
 
-### Phase 3：单 block sparse update
+### Phase 3：集成 SerialSparseTrie
 
-- blinded/revealed node；
-- proof reveal；
-- insert/update/delete；
-- dirty rehash 和 TrieUpdates；
-- 与 full rebuild root 对照。
+- `with_root` 冷启动 + `reveal_nodes` 灌入 multiproof；
+- `update_leaf` / `remove_leaf`（删除延后）+ `root` + `take_updates`；
+- provider 先用 `DefaultTrieNodeProvider` 占位；
+- 与 full-rebuild oracle 对照。
 
-### Phase 4：cache 与 partial proof
+### Phase 4：cache 与去重调度
 
 - cache anchor；
 - 跨 block 保留 revealed nodes；
-- `min_len` partial proof；
-- multiproof 去重；
-- proof chunking、乱序 completion 和 stale generation；
-- delete collapse 的补充 proof。
+- fetched-target 去重与 EmptyProof 短路；
+- proof chunking、乱序 completion、sequencer 与 stale generation；
+- 实现 `FlatStoreProvider` 兜底，覆盖 delete collapse 的 blinded sibling。
 
 ### Phase 5：Reth 2.0 hashed state 与历史状态
 
@@ -1104,7 +1140,7 @@ TrieDb.root
 - latest account 通过 `keccak256(address)` 定位；
 - cold cache 能通过 proof 完成 sparse update；
 - warm cache 能复用已 reveal 节点；
-- partial proof 只补充 blinded boundary 以下的缺失节点；
+- 已取过的 proof target 不再重复请求，EmptyProof 短路仍保持 sequence 顺序语义；
 - 插入、更新、删除和 branch collapse 均通过 full rebuild root 校验；
 - TrieUpdates 可以把持久化 TrieDB 推进到相同 root；
 - historical account 查询严格遵守 `state(block)` 语义；
@@ -1115,7 +1151,7 @@ TrieDb.root
 - `FinishUpdates`、drain、root validation 和 atomic commit 是四个不同阶段；
 - 乱序 completion、不同 chunk size 和 worker capacity 下结果仍 deterministic；
 - cancel/reorg 后的 stale generation proof 不会污染新 cache；
-- 无进展的 proof/retry 循环能失败退出，而不是永久自旋。
+- provider miss 作为硬错误立即失败退出，而不是永久自旋。
 
 ## 25. 参考
 
@@ -1124,3 +1160,5 @@ TrieDb.root
 - [Reth: use hashed state as canonical state representation](https://github.com/paradigmxyz/reth/pull/21115)
 - [Reth sparse trie implementation](https://github.com/paradigmxyz/reth/tree/main/crates/trie/sparse)
 - [Reth proof v2 implementation](https://github.com/paradigmxyz/reth/tree/main/crates/trie/trie/src/proof_v2)
+- [alloy-trie](https://github.com/alloy-rs/trie)（`HashBuilder`、`ProofRetainer`、`Nibbles`、proof 校验）
+- upstream 调度参考：`crates/engine/tree/src/tree/payload_processor/multiproof.rs`（`MultiProofTask` / `ProofSequencer`）与 `sparse_trie.rs`（`SparseTrieTask`）
