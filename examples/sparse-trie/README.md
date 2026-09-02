@@ -14,7 +14,7 @@ v0.3 变更：确定复用策略——trie 内核与全部密码学/编码管道
 3. 把 proof reveal 到只展开局部路径的 sparse trie。
 4. 在 sparse trie 中完成账户插入、更新和删除，并计算新 state root。
 5. 生成并持久化 trie updates，使 TrieDB 前进到新 root。
-6. 跨 block 保留 sparse trie，模拟 sparse trie cache。
+6. 跨 block 保留 sparse trie，模拟 sparse trie cache，请求trie的时候分为两层(root trie包括前三层，更深层的用subtrie来表示)。
 7. 已请求过 proof 的目标不再重复请求：fetched-target 去重与 EmptyProof 短路，模拟 upstream 的 multiproof 去重语义。
 8. 用 plain-address changeset 和 history index 查询 historical account。
 9. 支持最小 reorg/unwind，并验证 unwind 后 root 和账户状态都正确。
@@ -25,12 +25,20 @@ v0.3 变更：确定复用策略——trie 内核与全部密码学/编码管道
 ```text
 plain account changes
         │
-        ├── keccak(address) ──> HashedPostState
+        ├── keccak(address) ──> LeafUpdate
         │
-        ├── 派生 proof targets（fetched-target 去重后派发 multiproof）
-        │
-        ├── sequencer 按序放行 -> reveal -> sparse trie update
-        │       └── 漏网 blinded 节点由 TrieNodeProvider 同步兜底
+        ├── update_leaves()
+        |   ├── blind:派生proof targets (根据缓存更新parent)
+        |   |   └── fetch_proofs(targets) -> Vec<DecodedMultiProofV2> 
+        |   |        (这里是把多个targets的proofs合并去重后返回，这里有优化)
+        |   |   └── on_proof_results(DecodedMultiProofV2)
+        |   |         └── reveal_decoded_multiproof_v2(DecodedMultiProofV2)
+        |   ├── revealed: trie.update_leaves()
+        |       └──更新中间的trie节点
+        |── subtrie更新完毕
+        |   └──finished_state_updates(payload那边不会再发送新交易的事件)
+        |   └──&& no_pending_sparse_trie_updates
+        │── 更新root + 返回trieupdates
         │
         ├── new state root + TrieUpdates
         │
@@ -54,7 +62,7 @@ plain account changes
 ```text
 updates          — SparseTrieTaskMessage:
                      HashedState(HashedPostState)   权威状态更新（执行结果）
-                     PrefetchProofs(targets)        prewarm 的 best-effort 预取提示
+                     PrefetchProofs(targets)-> Vec<ProofTrieNodeV2>       prewarm 的 best-effort 预取提示
                      FinishedStateUpdates           输入结束标记
 proof_result_rx  — ProofResultMessage               proof worker 回传的多重证明（multiproof）结果
 cancel_rx        —                                  取消信号
