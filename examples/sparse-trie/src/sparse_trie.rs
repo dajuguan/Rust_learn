@@ -20,7 +20,7 @@ use reth_trie::{
     hashed_cursor::HashedCursorFactory, trie_cursor::TrieCursorFactory, DecodedMultiProofV2,
     ProofV2Target, ProofV2TargetParent, TrieAccount, EMPTY_ROOT_HASH, TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
-use reth_trie_common::{HashedPostState, MultiProofTargetsV2};
+use reth_trie_common::{updates::TrieUpdates, HashedPostState, MultiProofTargetsV2};
 use reth_trie_sparse::errors::{SparseStateTrieErrorKind, SparseTrieErrorKind};
 use reth_trie_sparse::{LeafUpdate, SparseStateTrie, TrieNodeEpoch};
 use tracing::{debug, error, warn};
@@ -28,6 +28,17 @@ use tracing::{debug, error, warn};
 /// Number of proof targets accumulated during streaming before they are dispatched early, so a
 /// long-running update stream does not grow `pending_targets` without bound.
 const MAX_PENDING_TARGETS_BEFORE_DISPATCH: usize = 300;
+
+/// Outcome of the state root computation.
+#[derive(Debug, Clone)]
+pub struct StateRootComputeOutcome {
+    /// The computed state root.
+    pub state_root: B256,
+    /// Trie node updates (added/removed intermediate nodes).
+    pub trie_updates: TrieUpdates,
+    /// The hashed post state that was processed.
+    pub hashed_state: HashedPostState,
+}
 
 pub struct DefaultStateRootStrategy;
 
@@ -85,7 +96,7 @@ impl DefaultStateRootStrategy {
 
 pub struct StateRootHandle {
     update_tx: Arc<dyn StateRootSink>,
-    root_rx: mpsc::Receiver<Result<B256, StateRootTaskError>>,
+    root_rx: mpsc::Receiver<Result<StateRootComputeOutcome, StateRootTaskError>>,
 }
 
 impl StateRootHandle {
@@ -98,7 +109,7 @@ impl StateRootHandle {
     }
 
     /// Waits for the task outcome, including the reason it refused or failed to compute a root.
-    pub fn wait_for_result(&self) -> Result<B256, StateRootTaskError> {
+    pub fn wait_for_result(&self) -> Result<StateRootComputeOutcome, StateRootTaskError> {
         self.root_rx.recv().map_err(|_| {
             warn!(
                 target: "engine::tree::payload_processor",
@@ -108,8 +119,8 @@ impl StateRootHandle {
         })?
     }
 
-    /// Waits for the state root, collapsing any task failure into `None`.
-    pub fn wait_for_final_root(&self) -> Option<B256> {
+    /// Waits for the state root outcome, collapsing any task failure into `None`.
+    pub fn wait_for_final_outcome(&self) -> Option<StateRootComputeOutcome> {
         self.wait_for_result().ok()
     }
 }
@@ -184,7 +195,7 @@ pub struct SparseTrieCacheActor {
     /// //////////////////////////////////////////
     /// hashed post state for HashedAccount db
     hashed_post_state: HashedPostState,
-    root_tx: mpsc::Sender<Result<B256, StateRootTaskError>>,
+    root_tx: mpsc::Sender<Result<StateRootComputeOutcome, StateRootTaskError>>,
 }
 
 impl SparseTrieCacheActor {
@@ -192,7 +203,7 @@ impl SparseTrieCacheActor {
         update_rx: CrossbeamReceiver<SparseTrieTaskEvent>,
         trie: SparseStateTrie,
         proof_handle: ProofWorkerHandle,
-        root_tx: mpsc::Sender<Result<B256, StateRootTaskError>>,
+        root_tx: mpsc::Sender<Result<StateRootComputeOutcome, StateRootTaskError>>,
         proof_result_rx: CrossbeamReceiver<ProofResultMessage>,
         parent_state_root: B256,
         new_epoch: TrieNodeEpoch,
@@ -218,8 +229,8 @@ impl SparseTrieCacheActor {
     }
 
     /// Runs the task until the last state update was received and fully applied to the trie, then
-    /// returns the state root. The outcome is published to the handle by the caller.
-    pub fn run(&mut self) -> Result<B256, StateRootTaskError> {
+    /// returns the compute outcome. The outcome is published to the handle by the caller.
+    pub fn run(&mut self) -> Result<StateRootComputeOutcome, StateRootTaskError> {
         // loop recved states
         let mut done = false;
         while !self.finished_state_updates {
@@ -254,8 +265,8 @@ impl SparseTrieCacheActor {
 
         debug!(target: "engine::root", "All proofs processed, ending calculation");
 
-        let state_root = match self.trie.root_with_updates(self.new_epoch) {
-            Ok((state_root, _trie_updates)) => state_root,
+        let (state_root, trie_updates) = match self.trie.root_with_updates(self.new_epoch) {
+            Ok((state_root, trie_updates)) => (state_root, trie_updates),
             Err(err)
                 if matches!(
                     err.kind(),
@@ -264,7 +275,7 @@ impl SparseTrieCacheActor {
             {
                 // A still-blind account trie means this payload never changed state, so preserve
                 // the cached parent root instead of fetching and revealing the unchanged root node.
-                self.parent_state_root
+                (self.parent_state_root, TrieUpdates::default())
             }
             Err(err) => {
                 return Err(StateRootTaskError::Other(format!(
@@ -273,7 +284,11 @@ impl SparseTrieCacheActor {
             }
         };
 
-        Ok(state_root)
+        Ok(StateRootComputeOutcome {
+            state_root,
+            trie_updates,
+            hashed_state: core::mem::take(&mut self.hashed_post_state),
+        })
     }
 
     fn on_update(&mut self, update: SparseTrieTaskEvent) {

@@ -39,19 +39,21 @@ mod tests {
         handle.on_hashed_state_update(state);
         handle.on_updates_finished();
 
-        let final_root = handle.wait_for_final_root();
-        match final_root {
-            Some(root) => println!("Final state root: {:?}", root),
+        let outcome = handle.wait_for_final_outcome();
+        match outcome {
+            Some(outcome) => {
+                println!("Final state root: {:?}", outcome.state_root);
+                println!("Trie updates: {} nodes", outcome.trie_updates.account_nodes.len());
+            }
             None => {
                 overlay.clear_sparse_trie();
-                eprintln!("Failed to retrieve final state root")
+                eprintln!("Failed to retrieve final outcome")
             }
         }
     }
 
-    /// The sparse trie task must reproduce the root computed independently from
-    /// the final account set, exercising real intermediate trie-node caching
-    /// and simulated DB latency.
+    /// The sparse trie task must produce a root that, once committed to the DB,
+    /// matches the root computed independently from the final account set.
     #[test]
     fn sparse_trie_task_matches_full_trie_root() {
         let db: crate::inmem_db::InMemoryTrieDb = test_db();
@@ -109,9 +111,13 @@ mod tests {
         }
         handle.on_updates_finished();
 
-        let root = handle.wait_for_final_root().expect("state root");
+        let outcome = handle.wait_for_final_outcome().expect("outcome");
 
-        // Build the expected final account set and compute the root independently.
+        // Commit the outcome to the DB — trie nodes are applied incrementally,
+        // no full recomputation needed.
+        db.commit_outcome(outcome);
+
+        // After commit, db.state_root() should match the independently computed root.
         let mut expected_accounts = initial_accounts;
         expected_accounts.remove(&hashed_address(1));
         expected_accounts.insert(hashed_address(2), changed);
@@ -122,6 +128,6 @@ mod tests {
             expected_accounts.iter().map(|(&k, &v)| (k, (v, empty_storage.iter().cloned()))),
         );
 
-        assert_eq!(root, expected);
+        assert_eq!(db.state_root(), expected);
     }
 }

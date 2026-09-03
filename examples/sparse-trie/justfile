@@ -1,0 +1,2 @@
+test:
+    RUST_LOG=info cargo test -- --nocapture

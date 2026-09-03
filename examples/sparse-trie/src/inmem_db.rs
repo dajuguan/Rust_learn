@@ -31,7 +31,9 @@ use reth_trie::{
     },
     StateRoot,
 };
-use reth_trie_common::{BranchNodeCompact, Nibbles};
+use reth_trie_common::{BranchNodeCompact, HashedPostState, Nibbles};
+
+use crate::sparse_trie::StateRootComputeOutcome;
 
 /// Builds a storage map where every account has an (empty) storage entry.
 ///
@@ -59,6 +61,8 @@ struct InMemoryTrieDbInner {
     hashed_accounts: BTreeMap<B256, Account>,
     /// Cached intermediate account-trie branch nodes, keyed by full nibble path.
     trie_nodes: BTreeMap<Nibbles, BranchNodeCompact>,
+    /// The current state root hash.
+    state_root: B256,
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,7 @@ impl InMemoryTrieDb {
             inner: Arc::new(RwLock::new(InMemoryTrieDbInner {
                 hashed_accounts: BTreeMap::new(),
                 trie_nodes: BTreeMap::new(),
+                state_root: reth_trie::EMPTY_ROOT_HASH,
             })),
             delay,
         }
@@ -114,16 +119,51 @@ impl InMemoryTrieDb {
         self.recompute_trie();
     }
 
-    /// Returns the most recently computed state root.
+    /// Returns the current state root (cached from the last computation/commit).
     pub fn state_root(&self) -> B256 {
         let inner = self.inner.read().unwrap();
-        self.compute_root_and_nodes(&inner.hashed_accounts).0
+        inner.state_root
+    }
+
+    /// Applies the outcome from a sparse trie computation.
+    ///
+    /// This updates the hashed accounts and incrementally applies the trie node
+    /// changes, avoiding a full recomputation.
+    pub fn commit_outcome(&self, outcome: StateRootComputeOutcome) {
+        let StateRootComputeOutcome { state_root, trie_updates, hashed_state } = outcome;
+        let mut inner = self.inner.write().unwrap();
+
+        // Apply account changes to hashed state
+        for (addr, account) in &hashed_state.accounts {
+            match account {
+                Some(acc) => inner.hashed_accounts.insert(*addr, *acc),
+                None => inner.hashed_accounts.remove(addr),
+            };
+        }
+
+        // Apply trie node updates
+        for (path, node) in trie_updates.account_nodes {
+            inner.trie_nodes.insert(path, node);
+        }
+        for path in trie_updates.removed_nodes {
+            inner.trie_nodes.remove(&path);
+        }
+
+        // Store the new state root
+        inner.state_root = state_root;
+
+        tracing::debug!(
+            ?state_root,
+            accounts = inner.hashed_accounts.len(),
+            trie_nodes = inner.trie_nodes.len(),
+            "inmem_db: committed outcome"
+        );
     }
 
     // -- internal -----------------------------------------------------------
 
     /// Recomputes the trie from the current hashed accounts and stores the
-    /// resulting branch nodes.
+    /// resulting branch nodes and state root.
     fn recompute_trie(&self) {
         let hashed_accounts = {
             let inner = self.inner.read().unwrap();
@@ -132,6 +172,7 @@ impl InMemoryTrieDb {
         let (root, trie_nodes) = self.compute_root_and_nodes(&hashed_accounts);
         let mut inner = self.inner.write().unwrap();
         inner.trie_nodes = trie_nodes;
+        inner.state_root = root;
         tracing::debug!(?root, "inmem_db: trie recomputed");
     }
 
@@ -256,5 +297,123 @@ impl DatabaseProviderROFactory for InMemoryTrieDbFactory {
 
     fn database_provider_ro(&self) -> ProviderResult<Self::Provider> {
         Ok(self.db.clone())
+    }
+}
+
+/// Generates deterministic test accounts from a seed.
+///
+/// Returns a `BTreeMap` of hashed addresses to accounts, suitable for seeding
+/// an [`InMemoryTrieDb`] or for independent root computation.
+///
+/// The seed ensures reproducibility across test runs.
+pub fn generate_test_accounts(count: usize, seed: u64) -> BTreeMap<B256, Account> {
+    use alloy_primitives::keccak256;
+
+    let mut accounts = BTreeMap::new();
+    for i in 0..count {
+        // Derive a deterministic "address" from seed + index
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[0..8].copy_from_slice(&(seed.wrapping_add(i as u64)).to_le_bytes());
+        addr_bytes[8..16].copy_from_slice(&(i as u64).to_le_bytes());
+        let hashed_addr = keccak256(addr_bytes);
+
+        // Deterministic nonce from seed
+        let nonce = ((seed >> 3).wrapping_add(i as u64)) as u64;
+
+        accounts.insert(hashed_addr, Account { nonce, balance: U256::ZERO, bytecode_hash: None });
+    }
+    accounts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_trie_nodes() {
+        let db: InMemoryTrieDb = InMemoryTrieDb::new();
+
+        // Generate accounts to create a deeper trie structure
+        let initial_accounts = generate_test_accounts(29, 42);
+        for (&addr, &account) in &initial_accounts {
+            db.update_account(addr, Some(account));
+        }
+
+        let inner = db.inner.read().unwrap();
+
+        // Collect all leaf paths (first 4 bytes = 8 hex chars)
+        let mut leaf_paths: Vec<String> = inner
+            .hashed_accounts
+            .keys()
+            .map(|addr| format!("{:x}", addr)[..8].to_string())
+            .collect();
+        leaf_paths.sort();
+
+        // Collect all branch paths
+        let mut branch_paths: Vec<String> = inner
+            .trie_nodes
+            .keys()
+            .map(|n| n.iter().map(|b| format!("{:x}", b)).collect::<Vec<_>>().join(""))
+            .collect();
+        branch_paths.sort();
+
+        // Print tree structure
+        println!();
+        println!("root (state_root: {:?})", inner.state_root);
+        println!(" │");
+
+        // Group leaves by first nibble to show logical trie structure
+        let mut by_prefix: BTreeMap<String, Vec<&String>> = BTreeMap::new();
+        for leaf in &leaf_paths {
+            let prefix = &leaf[..1];
+            by_prefix.entry(prefix.to_string()).or_default().push(leaf);
+        }
+
+        println!(" ├── LOGICAL TRIE STRUCTURE (all branches, including implicit):");
+        for (prefix, leaves) in &by_prefix {
+            let is_cached = branch_paths.contains(prefix);
+            let cached_marker = if is_cached { "✓ cached" } else { "implicit" };
+
+            if leaves.len() == 1 {
+                // Single leaf - direct child of root (no branch needed)
+                println!(" │   └─ [{}]: leaf {}", prefix, leaves[0]);
+            } else {
+                // Multiple leaves - there's a branch node here
+                println!(
+                    " │   ├─ [{}]: branch ({}) → {} leaves",
+                    prefix,
+                    cached_marker,
+                    leaves.len()
+                );
+                for leaf in leaves {
+                    println!(" │   │     └─ {}", leaf);
+                }
+            }
+        }
+
+        println!();
+        println!(" ├── CACHED BRANCH NODES (stored in trie_nodes): {}", branch_paths.len());
+        for (path, node) in &inner.trie_nodes {
+            let path_str: String = path.iter().map(|b| format!("{:x}", b)).collect();
+            println!(" │   [{}]:", path_str);
+            println!(" │     state_mask: {:?} (children at positions)", node.state_mask);
+            println!(" │     tree_mask:  {:?} (children with sub-tries)", node.tree_mask);
+            println!(" │     hash_mask:  {:?} (children stored as hashes)", node.hash_mask);
+            println!(" │     hashes: {} items", node.hashes.len());
+            for (i, hash) in node.hashes.iter().enumerate() {
+                println!(" │       [{}]: {:?}", i, hash);
+            }
+        }
+
+        println!();
+        println!(
+            "Summary: {} accounts, {} cached branch nodes",
+            inner.hashed_accounts.len(),
+            inner.trie_nodes.len()
+        );
+        println!("Note: 'implicit' branches exist logically but aren't cached in trie_nodes.");
+        println!(
+            "      Only branches with sub-structure are stored for efficient proof generation."
+        );
     }
 }

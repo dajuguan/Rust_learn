@@ -5484,6 +5484,7 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-errors",
+ "reth-tracing",
  "reth-trie",
  "reth-trie-common",
  "reth-trie-sparse",
