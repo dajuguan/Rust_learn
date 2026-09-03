@@ -97,9 +97,10 @@ root_with_updates(new_epoch)
 值得注意的语义：
 
 1. `select_biased!` 使 `updates` 通道优先于 proof 结果——先吸收输入，避免生产者阻塞；
-2. 收到的状态更新被 `on_hashed_state_update` 立刻摊平进 `new_account_updates: B256Map<LeafUpdate>`（storage 同理）；`pending_updates` 只是"有几条消息还没被 apply"的计数器，不存数据；
+2. 收到的状态更新被 `on_hashed_state_update` 立刻摊平进 `new_account_updates: B256Map<LeafUpdate>`——leaf 在这一步就用 `EMPTY_ROOT_HASH` 编码完毕，storage 更新只进 `hashed_post_state` 而不建 storage trie；`pending_updates` 只是"有几条消息还没被 apply"的计数器，不存数据；
 3. proof 结果有合并（coalesce）优化：`on_proof_results` 收到一条后会把通道里已排队的其余结果全部 `try_recv` 出来合成一个大 multiproof，再一次性 `reveal_decoded_multiproof_v2`，降低每次 reveal 的固定开销（对应 8.6 节 policy 2）；
 4. 收尾时如果 account trie 仍是 blind（整个 block 没改任何状态），直接沿用 parent state root，跳过为算 root 而取 proof。
+5. 因为 leaf 里的 storage root 恒为 `EMPTY_ROOT_HASH`，`process_account_leaf_updates` 在把 update 交给 trie 之前会先看一眼该地址当前可读的 leaf：若它带着非空 storage root，任务以 `StorageOutOfScope` 失败，而不是把别人的存储指针清掉。这个检查在每轮重试时都会重做，所以 proof reveal 之后才变得可读的 leaf 同样拦得住——被更新的账户一律无 storage，这是本示例的边界条件，不是实现漏掉的优化。
 
 #### `make_progress()`：背压优先、乐观应用
 
@@ -110,8 +111,7 @@ fn make_progress():
     if !updates_queued && proof_result_rx.is_empty():
         // 两个通道都空 —— 做完整的一轮重活
         dispatch_pending_targets()          // 把攒下的 target 发给 proof workers
-        process_new_updates()               // 乐观 apply：见下
-        promote_pending_account_updates()   // storage root 就绪的账户提升为 account leaf 更新
+        process_new_updates()               // 乐观 apply：本轮新 update + 上轮被退回的，见下
         if finished && 无 pending 更新: return true   // 唯一的终止出口
         dispatch_pending_targets()
         ensure_not_stalled()                // 卡死检测：还有活但没有任何在途事件 → 硬错误

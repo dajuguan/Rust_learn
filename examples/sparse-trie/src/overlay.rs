@@ -13,4 +13,9 @@ impl OverlayManager {
     pub fn take_sparse_trie(&self) -> Option<SparseStateTrie> {
         self.trie.lock().unwrap().take()
     }
+
+    /// Clears the preserved sparse trie when trie task fails to produce a final root.
+    pub fn clear_sparse_trie(&self) {
+        *self.trie.lock().unwrap() = None;
+    }
 }

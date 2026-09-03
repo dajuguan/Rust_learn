@@ -6,11 +6,21 @@ edition = "2024"
 [dependencies]
 reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth.git", rev = "9dd31ea6a8" }
 reth-trie-common = { git = "https://github.com/paradigmxyz/reth.git", rev = "9dd31ea6a8" }
+reth-trie = { git = "https://github.com/paradigmxyz/reth.git", rev = "9dd31ea6a8", features = [
+    "test-utils",
+] }
+reth-provider = { git = "https://github.com/paradigmxyz/reth.git", rev = "9dd31ea6a8" }
 alloy-trie = "0.9.5"
 alloy-primitives = { version = "1.6", features = ["map"] }
 alloy-rlp = "0.3"
 thiserror = "2"
+# `Account` in the hashed post state the sparse trie task consumes.
+reth-primitives-traits = "0.6.0"
 crossbeam-channel = "0.5.13"
 tracing = { version = "0.1.0", default-features = false, features = [
     "attributes",
 ] }
+
+[dev-dependencies]
+# `DatabaseError` for implementing the cursor-factory traits on the in-memory test provider.
+reth-storage-errors = { git = "https://github.com/paradigmxyz/reth.git", rev = "9dd31ea6a8" }
