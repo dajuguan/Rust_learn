@@ -20,6 +20,10 @@ crossbeam-channel = "0.5.13"
 tracing = { version = "0.1.0", default-features = false, features = [
     "attributes",
 ] }
+# Arena-based sparse trie
+slotmap = "1.0"
+rayon = "1.10"
+smallvec = "1.13"
 
 [dev-dependencies]
 # `DatabaseError` for implementing the cursor-factory traits on the in-memory test provider.

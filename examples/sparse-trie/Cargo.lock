@@ -5481,6 +5481,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-trie",
  "crossbeam-channel",
+ "rayon",
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-errors",
@@ -5488,6 +5489,8 @@ dependencies = [
  "reth-trie",
  "reth-trie-common",
  "reth-trie-sparse",
+ "slotmap",
+ "smallvec",
  "thiserror",
  "tracing",
 ]

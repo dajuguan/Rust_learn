@@ -1,10 +1,11 @@
+mod arena;
 mod errors;
-mod overlay;
-mod proof_task;
-mod sparse_trie;
-
 #[cfg(test)]
 mod inmem_db;
+mod overlay;
+mod proof_task;
+mod sparse_state_trie;
+mod sparse_trie;
 
 #[cfg(test)]
 mod tests {

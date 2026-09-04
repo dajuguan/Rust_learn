@@ -1,2 +1,5 @@
 test:
     RUST_LOG=info cargo test -- --nocapture
+
+lib:
+    RUST_LOG=info cargo test --lib tests::sparse_trie -- --nocapture

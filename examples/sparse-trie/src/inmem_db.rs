@@ -160,6 +160,36 @@ impl InMemoryTrieDb {
         );
     }
 
+    /// Commits updates from an ArenaParallelSparseTrie.
+    ///
+    /// This takes the SparseTrieUpdates from the arena trie and applies them
+    /// to the in-memory database, along with the computed state root.
+    pub fn commit_sparse_trie_updates(
+        &self,
+        updates: reth_trie_sparse::SparseTrieUpdates,
+        state_root: B256,
+    ) {
+        let mut inner = self.inner.write().unwrap();
+
+        // Apply trie node updates
+        for (path, node) in updates.updated_nodes {
+            inner.trie_nodes.insert(path, node);
+        }
+        for path in updates.removed_nodes {
+            inner.trie_nodes.remove(&path);
+        }
+
+        // Store the new state root
+        inner.state_root = state_root;
+
+        tracing::debug!(
+            ?state_root,
+            accounts = inner.hashed_accounts.len(),
+            trie_nodes = inner.trie_nodes.len(),
+            "inmem_db: committed sparse trie updates"
+        );
+    }
+
     // -- internal -----------------------------------------------------------
 
     /// Recomputes the trie from the current hashed accounts and stores the
@@ -415,5 +445,119 @@ mod tests {
         println!(
             "      Only branches with sub-structure are stored for efficient proof generation."
         );
+    }
+
+    #[test]
+    fn debug_proof_calculator_0xdb() {
+        use alloy_primitives::keccak256;
+        use reth_trie::{
+            hashed_cursor::{HashedCursor, HashedCursorFactory},
+            proof_v2::{self, SyncAccountValueEncoder},
+            trie_cursor::TrieCursorFactory,
+        };
+        use reth_trie_common::ProofV2Target;
+
+        // Create the same 4 accounts as the failing test
+        let db = InMemoryTrieDb::new();
+        let hashed_addr_1 = keccak256([1]);
+        let hashed_addr_2 = keccak256([2]);
+        let hashed_addr_3 = keccak256([3]);
+        let hashed_addr_4 = keccak256([4]);
+
+        println!("\n=== Hashed addresses ===");
+        println!("hashed_addr_1: {:x}", hashed_addr_1);
+        println!("hashed_addr_2: {:x}", hashed_addr_2);
+        println!("hashed_addr_3: {:x}", hashed_addr_3);
+        println!("hashed_addr_4: {:x}", hashed_addr_4);
+
+        let accounts = vec![
+            (hashed_addr_1, Account { nonce: 1, balance: U256::from(100), bytecode_hash: None }),
+            (hashed_addr_2, Account { nonce: 2, balance: U256::from(200), bytecode_hash: None }),
+            (
+                hashed_addr_3,
+                Account {
+                    nonce: 3,
+                    balance: U256::from(300),
+                    bytecode_hash: Some(keccak256([0xef])),
+                },
+            ),
+            (hashed_addr_4, Account { nonce: 4, balance: U256::from(400), bytecode_hash: None }),
+        ];
+
+        for (addr, account) in &accounts {
+            db.update_account(*addr, Some(*account));
+        }
+
+        // Check cached trie nodes
+        let inner = db.inner.read().unwrap();
+        println!("\n=== Cached trie nodes: {} ===", inner.trie_nodes.len());
+        for (path, node) in &inner.trie_nodes {
+            let path_str: String = path.iter().map(|b| format!("{:x}", b)).collect();
+            println!("  [{}]: state_mask={:?}", path_str, node.state_mask);
+        }
+        drop(inner);
+
+        // Get snapshot
+        let (trie_factory, hashed_factory) = db.snapshot();
+
+        // Test 1: Seek hashed cursor to 0xdb prefix
+        println!("\n=== Test 1: Seek hashed cursor to 0xdb ===");
+        let mut hashed_cursor = hashed_factory.hashed_account_cursor().unwrap();
+        let seek_target = B256::from_slice(&[
+            0xdb, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+        ]);
+        let seek_result = hashed_cursor.seek(seek_target).unwrap();
+        println!("Seek to 0xdb00...: {:?}", seek_result.map(|(k, _)| format!("{:x}", k)));
+
+        // Test 2: Proof with JUST 0xdb target
+        println!("\n=== Test 2: Proof with JUST 0xdb target ===");
+        let (trie_factory, hashed_factory) = db.snapshot();
+        let account_trie_cursor = trie_factory.account_trie_cursor().unwrap();
+        let account_hashed_cursor = hashed_factory.hashed_account_cursor().unwrap();
+        let mut value_encoder =
+            SyncAccountValueEncoder::new(trie_factory.clone(), hashed_factory.clone());
+        let mut calculator =
+            proof_v2::ProofCalculator::new(account_trie_cursor, account_hashed_cursor);
+
+        let mut targets_0xdb = vec![ProofV2Target::new(hashed_addr_3)];
+        println!("Target: {:x}", hashed_addr_3);
+        println!("Target nibbles: {:?}", targets_0xdb[0].key_nibbles);
+
+        let proof_nodes = calculator.proof(&mut value_encoder, &mut targets_0xdb).unwrap();
+        println!("Returned {} proof nodes:", proof_nodes.len());
+        for node in &proof_nodes {
+            let path_str: String = node.path.iter().map(|b| format!("{:x}", b)).collect();
+            println!("  path=[{}]", path_str);
+        }
+
+        // Test 3: Proof with ALL 3 targets (0x5f, 0xdb, 0xf2)
+        println!("\n=== Test 3: Proof with ALL targets (0x5f, 0xdb, 0xf2) ===");
+        let (trie_factory, hashed_factory) = db.snapshot();
+        let account_trie_cursor = trie_factory.account_trie_cursor().unwrap();
+        let account_hashed_cursor = hashed_factory.hashed_account_cursor().unwrap();
+        let mut value_encoder =
+            SyncAccountValueEncoder::new(trie_factory.clone(), hashed_factory.clone());
+        let mut calculator =
+            proof_v2::ProofCalculator::new(account_trie_cursor, account_hashed_cursor);
+
+        let mut all_targets = vec![
+            ProofV2Target::new(hashed_addr_1),
+            ProofV2Target::new(hashed_addr_3),
+            ProofV2Target::new(hashed_addr_4),
+        ];
+        all_targets.sort_by(|a, b| a.key_nibbles.cmp(&b.key_nibbles));
+
+        println!("Targets (sorted):");
+        for t in &all_targets {
+            println!("  nibbles={:?}", t.key_nibbles);
+        }
+
+        let proof_nodes = calculator.proof(&mut value_encoder, &mut all_targets).unwrap();
+        println!("Returned {} proof nodes:", proof_nodes.len());
+        for node in &proof_nodes {
+            let path_str: String = node.path.iter().map(|b| format!("{:x}", b)).collect();
+            println!("  path=[{}]", path_str);
+        }
     }
 }

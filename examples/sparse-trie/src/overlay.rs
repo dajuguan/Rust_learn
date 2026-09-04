@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use reth_trie_sparse::SparseStateTrie;
+use crate::sparse_state_trie::SparseStateTrie;
 
 // cross block overlays
 #[derive(Debug, Default)]

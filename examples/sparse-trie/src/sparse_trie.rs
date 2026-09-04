@@ -7,6 +7,7 @@ use crate::{
     errors::StateRootTaskError,
     overlay::OverlayManager,
     proof_task::{ProofResultMessage, ProofWorkerHandle},
+    sparse_state_trie::SparseStateTrie,
 };
 use alloy_primitives::{
     map::{hash_map::Entry, B256Map},
@@ -21,8 +22,8 @@ use reth_trie::{
     ProofV2Target, ProofV2TargetParent, TrieAccount, EMPTY_ROOT_HASH, TRIE_ACCOUNT_RLP_MAX_SIZE,
 };
 use reth_trie_common::{updates::TrieUpdates, HashedPostState, MultiProofTargetsV2};
-use reth_trie_sparse::errors::{SparseStateTrieErrorKind, SparseTrieErrorKind};
-use reth_trie_sparse::{LeafUpdate, SparseStateTrie, TrieNodeEpoch};
+use reth_trie_sparse::errors::SparseTrieErrorKind;
+use reth_trie_sparse::{LeafUpdate, TrieNodeEpoch};
 use tracing::{debug, error, warn};
 
 /// Number of proof targets accumulated during streaming before they are dispatched early, so a
@@ -267,12 +268,7 @@ impl SparseTrieCacheActor {
 
         let (state_root, trie_updates) = match self.trie.root_with_updates(self.new_epoch) {
             Ok((state_root, trie_updates)) => (state_root, trie_updates),
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    SparseStateTrieErrorKind::Sparse(SparseTrieErrorKind::Blind)
-                ) =>
-            {
+            Err(err) if matches!(err.kind(), SparseTrieErrorKind::Blind) => {
                 // A still-blind account trie means this payload never changed state, so preserve
                 // the cached parent root instead of fetching and revealing the unchanged root node.
                 (self.parent_state_root, TrieUpdates::default())
@@ -443,8 +439,6 @@ impl SparseTrieCacheActor {
             .trie_mut()
             .update_leaves(account_updates, |target, parent| {
                 match self.requested_proofs.entry(target) {
-                    // A parent broader than the one already requested means the cached proof does not
-                    // reach deep enough into the trie, so it has to be fetched again.
                     Entry::Occupied(mut entry) => {
                         if parent < *entry.get() {
                             entry.insert(parent);
@@ -480,7 +474,10 @@ impl SparseTrieCacheActor {
             return;
         }
 
-        let targets = core::mem::take(&mut self.pending_targets);
+        let mut targets = core::mem::take(&mut self.pending_targets);
+        // Proof calculator requires targets sorted lexicographically.
+        targets.account_targets.sort_unstable_by(|a, b| a.key_nibbles.cmp(&b.key_nibbles));
+        targets.account_targets.dedup_by(|a, b| a.key_nibbles == b.key_nibbles);
         self.in_flight_proof_batches += 1;
         self.proof_handle.dispatch_account_multiproof(targets, HashedPostState::default());
     }
